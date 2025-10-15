@@ -21,6 +21,26 @@ header = {
 const server = new FreeSwitchServer()
 const channels = {};
 
+const RTP_PORT_MIN = 40000;
+const RTP_PORT_MAX = 50000;
+const allocatedPorts = new Set();
+
+function allocateRtpPort() {
+    for (let port = RTP_PORT_MIN; port <= RTP_PORT_MAX; port++) {
+        if (!allocatedPorts.has(port)) {
+            allocatedPorts.add(port);
+            return port;
+        }
+    }
+    throw new Error('Нет доступных RTP портов в заданном диапазоне');
+}
+
+function releaseRtpPort(port) {
+    if (port !== undefined) {
+        allocatedPorts.delete(port);
+    }
+}
+
 
 class Channel {
     constructor() {
@@ -30,6 +50,16 @@ class Channel {
         this.sock = dgram.createSocket('udp4');
         this.bufferQueue = new EventEmitter();
         this.bufferQueue.setMaxListeners(100);
+
+        this.sock.on('error', (error) => {
+            console.error('[RTP] Ошибка сокета:', error);
+            this.sock.close();
+        });
+
+        this.sock.on('close', () => {
+            releaseRtpPort(this.dport);
+            this.dport = undefined;
+        });
     }
 
 
@@ -93,11 +123,11 @@ class Channel {
 
     async init(call, uuid) {
         this.port = 8025;
-        this.dport = 10026;
-    this.rtpAdress='127.0.0.1';
+        this.dport = allocateRtpPort();
+        this.rtpAdress='127.0.0.1';
         this.sock.bind(this.dport);
         this.receiveAudio();
-        
+
     try {
 	  const result = await call.unicast_uuid(uuid, {
             'local-ip': this.rtpAdress,
@@ -116,6 +146,30 @@ class Channel {
 //        this.sendAudio(this.rtpAdress, this.port); // for echo test
         this.sendAudioSTT(); // to DEEPGRAM!!!!
     }
+
+    cleanup() {
+        this.bufferQueue.removeAllListeners();
+        if (this.deepgramWs) {
+            try {
+                this.deepgramWs.close();
+            } catch (error) {
+                console.error('[Deepgram] Ошибка при закрытии WebSocket:', error);
+            }
+            this.deepgramWs = null;
+        }
+
+        if (this.sock) {
+            this.sock.removeAllListeners('message');
+            try {
+                this.sock.close();
+            } catch (error) {
+                console.error('[RTP] Ошибка при закрытии сокета:', error);
+            }
+        }
+
+        releaseRtpPort(this.dport);
+        this.dport = undefined;
+    }
 }
 
 
@@ -123,6 +177,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   console.log('AAAAAAAAAAAAAAAAAAAAAAAAA ',uuid);
   call.noevents();
   call.event_json('CHANNEL_ANSWER');
+  call.event_json('CHANNEL_HANGUP_COMPLETE');
   call.execute('answer');
 
   call.on('CHANNEL_ANSWER', async function({headers,body}) {
@@ -130,6 +185,15 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
      const fsChannel = new Channel();
      await fsChannel.init(call, uuid);
      channels[uuid] = fsChannel;
+  });
+
+  call.on('CHANNEL_HANGUP_COMPLETE', function() {
+    console.log('Call ended, cleaning up channel', uuid);
+    const fsChannel = channels[uuid];
+    if (fsChannel) {
+        fsChannel.cleanup();
+        delete channels[uuid];
+    }
   });
 
 })
