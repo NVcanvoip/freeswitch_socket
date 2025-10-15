@@ -1,0 +1,137 @@
+const { FreeSwitchServer, once } = require('esl');
+const WebSocket = require('ws');
+const dgram = require('dgram');
+const fs = require('fs');
+const path = require('path');
+const EventEmitter = require('events');
+const { setTimeout } = require('timers/promises');
+const { v4: uuidv4 } = require('uuid');
+
+
+api_key = "aaa"
+//deepgram_ws_url = "wss://api.deepgram.com/v1/listen?punctuate=true&model=nova-2&language=ru&sample_rate=8000&encoding=mulaw&smart_format=true&interim_results=true&utterance_end_ms=1000&vad_events=true&endpointing=300"
+deepgram_ws_url = "wss://api.deepgram.com/v1/listen?punctuate=true&model=nova-2&language=ru&sample_rate=8000&encoding=mulaw&smart_format=true&interim_results=true&utterance_end_ms=1000&vad_events=true&endpointing=300"
+//deepgram_ws_url = "wss://tester2.mobilon.ru:8765";
+
+header = {
+    "Authorization": "Token " + api_key
+}
+
+
+const server = new FreeSwitchServer()
+const channels = {};
+
+
+class Channel {
+    constructor() {
+        this.ssrc = Math.floor(Math.random() * 0xFFFFFFFF);
+        this.seqNum = 0;
+        this.timestamp = 0;
+        this.sock = dgram.createSocket('udp4');
+        this.bufferQueue = new EventEmitter();
+        this.bufferQueue.setMaxListeners(100);
+    }
+
+
+    receiveAudio() {
+    this.sock.on('message', (message, client) => {
+        if (message.length < 12) {
+            console.log("Ошибка: полученный пакет меньше 12 байт!");
+            return;
+        }
+            this.bufferQueue.emit('data', message);
+        });
+    }
+
+
+    sendAudioSTT() {
+        // Initialize Deepgram WebSocket
+	console.log("Console Log TRY Connected");
+
+        this.deepgramWs = new WebSocket(deepgram_ws_url, { headers: header });
+
+    this.deepgramWs.on("open", () => {
+	    console.log("[Deepgram] Connected");
+//	    deepgramWs.send(JSON.stringify({ event: 'connected' }));
+	    this.bufferQueue.on('data', (audioData) => {
+	    if (!audioData) return;
+//        	const audioData2 = audioData.toString('base64');
+//            	console.log('Send AUDIO');
+	    this.deepgramWs.send(audioData);
+
+	    });
+	});
+
+        this.deepgramWs.on("message", async (message) => {
+        try {
+            const response = JSON.parse(message);
+                console.log("[Deepgram] Response received: ", response.is_final , response.speech_final);
+	if (response.is_final === true || response.speech_final === true) {
+	     const transcript = response.channel.alternatives[0].transcript;
+	     console.log("Transcript: ", transcript);
+	}
+                console.log("[Deepgram] Response received: ",JSON.stringify(response, null, 2));
+                console.log(response);
+//                console.log(response.channel.alternatives[0].transcript);
+	    } catch (error) {
+    	console.error("[Deepgram] Error processing message: ", error, "Message: ", message);
+	    }
+    });
+    }
+
+
+    sendAudio(address, port) {
+        this.bufferQueue.on('data', (audioData) => {
+            if (!audioData) return;
+//		const rtpPacket = this.buildRtpPacket(audioData);
+    	const rtpPacket = audioData;
+    	setTimeout(1000).then(() => {
+        	    this.sock.send(rtpPacket, port, address);
+    	});
+        });
+    }
+
+    async init(call, uuid) {
+        this.port = 8025;
+        this.dport = 10026;
+    this.rtpAdress='127.0.0.1';
+        this.sock.bind(this.dport);
+        this.receiveAudio();
+        
+    try {
+	  const result = await call.unicast_uuid(uuid, {
+            'local-ip': this.rtpAdress,
+            'local-port': this.port,
+            'remote-ip': this.rtpAdress,
+            'remote-port': this.dport,
+            transport: 'udp',
+            flags: 'native'
+          });
+          console.log('Unicast result:', result);
+    } catch (error) {
+          console.error('Unicast error:', error);
+    }
+
+//        await setTimeout(3000); // for echo test
+//        this.sendAudio(this.rtpAdress, this.port); // for echo test
+        this.sendAudioSTT(); // to DEEPGRAM!!!!
+    }
+}
+
+
+server.on('connection', async (call ,{headers, body, data, uuid}) => {
+  console.log('AAAAAAAAAAAAAAAAAAAAAAAAA ',uuid);
+  call.noevents();
+  call.event_json('CHANNEL_ANSWER');
+  call.execute('answer');
+
+  call.on('CHANNEL_ANSWER', async function({headers,body}) {
+    console.log('11111111111Call was answered');
+     const fsChannel = new Channel();
+     await fsChannel.init(call, uuid);
+     channels[uuid] = fsChannel;
+  });
+
+})
+
+server.listen({ port: 8085 })
