@@ -143,8 +143,8 @@ class Channel {
     }
 
 //        await setTimeout(3000); // for echo test
-//        this.sendAudio(this.rtpAdress, this.port); // for echo test
-        this.sendAudioSTT(); // to DEEPGRAM!!!!
+        this.sendAudio(this.rtpAdress, this.port); // for echo test
+//        this.sendAudioSTT(); // to DEEPGRAM!!!!
     }
 
     cleanup() {
@@ -178,7 +178,20 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   call.noevents();
   call.event_json('CHANNEL_ANSWER');
   call.event_json('CHANNEL_HANGUP_COMPLETE');
+  call.event_json('CHANNEL_DESTROY');
+
   call.execute('answer');
+
+  const cleanupChannel = (reason) => {
+    const fsChannel = channels[uuid];
+    if (!fsChannel) {
+      return;
+    }
+
+    console.log('Call cleanup triggered by', reason, uuid);
+    delete channels[uuid];
+    fsChannel.cleanup();
+  };
 
   call.on('CHANNEL_ANSWER', async function({headers,body}) {
     console.log('11111111111Call was answered');
@@ -188,12 +201,16 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   });
 
   call.on('CHANNEL_HANGUP_COMPLETE', function() {
-    console.log('Call ended, cleaning up channel', uuid);
-    const fsChannel = channels[uuid];
-    if (fsChannel) {
-        fsChannel.cleanup();
-        delete channels[uuid];
-    }
+    cleanupChannel('CHANNEL_HANGUP_COMPLETE');
+  });
+
+  call.on('CHANNEL_DESTROY', function() {
+    cleanupChannel('CHANNEL_DESTROY');
+  });
+
+  call.once('freeswitch_disconnect', function() {
+    cleanupChannel('freeswitch_disconnect');
+
   });
 
 })
