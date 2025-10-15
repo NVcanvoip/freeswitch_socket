@@ -1,0 +1,579 @@
+<?php
+$dir = __DIR__ ;
+$dir = str_replace("local_scripts","",$dir);
+
+include_once $dir."/settings.php";
+include_once $dir."/db_connect.php";
+include_once $dir."/functions.php";
+include_once $dir."/fs_configuration/functions_vtpbx_fs.php";
+
+include_once 'functions_local_scripts.php';
+include_once 'functions_event_socket.php';
+
+
+
+while(true){
+
+/*
+ *
+ * Procedure:
+ *
+ *
+ *
+ *
+ *
+ */
+//1.  Get fifo list from FS
+
+    $start_time = microtime(true);
+
+
+
+
+    $password = "ClueCon";  // default
+    $port = "8021";  // default
+    $host = "127.0.0.1";  // default
+
+    $fp = event_socket_create($host, $port, $password);
+
+    $cmd = "api fifo list";
+
+
+    //get list of queues from FS:
+    $response = event_socket_request($fp, $cmd);
+
+
+
+    //echo  json_encode($response) ;
+
+    $xmlFIFOlist = simplexml_load_string($response);
+
+    if ($xmlFIFOlist === false) {
+        echo "Failed loading XML: ";
+
+    } else {
+        //echo "Loaded XML!";
+
+
+
+
+
+        foreach($xmlFIFOlist->fifo as $fifo)
+        {
+
+            //print_r($fifo);
+            /*
+
+            (
+                [@attributes] => Array
+                    (
+                        [name] => d1.vtpbx.com-FIFO-1
+                        [consumer_count] => 0
+                        [caller_count] => 0
+                        [waiting_count] => 0
+                        [importance] => 0
+                        [outbound_per_cycle] => 0
+                        [outbound_per_cycle_min] => 0
+                        [ring_timeout] => 0
+                        [default_lag] => 0
+                        [outbound_priority] => 5
+                        [outbound_strategy] => ringall
+                    )
+
+                [outbound] => SimpleXMLElement Object
+                    (
+                        [member] => Array
+                            (
+                                [0] => {fifo_member_wait=nowait}user/106@d1.vtpbx.com
+                                [1] => {fifo_member_wait=nowait}user/101@d1.vtpbx.com
+                                [2] => {fifo_member_wait=nowait}user/104@d1.vtpbx.com
+                            )
+
+                    )
+
+                [callers] => SimpleXMLElement Object
+                (
+                    [caller] => SimpleXMLElement Object
+                        (
+                            [@attributes] => Array
+                                (
+                                    [uuid] => a11bfa17-1604-4fdd-9f0f-2f2f8865913c
+                                    [status] => WAITING
+                                    [caller_id_name] => d1%20105
+                                    [caller_id_number] => 105
+                                    [timestamp] => 2019-04-23 20:35:44
+                                    [position] => 1
+                                    [slot] => 0
+                                )
+
+                        )
+
+                )
+
+
+                [consumers] => SimpleXMLElement Object
+                    (
+                    )
+
+                [bridges] => SimpleXMLElement Object
+                    (
+                        [bridge] => SimpleXMLElement Object
+                            (
+                                [@attributes] => Array
+                                    (
+                                        [fifo_name] => d1.vtpbx.com-FIFO-1
+                                        [bridge_start] => 2019-04-23 12:52:12
+                                        [bridge_start_epoch] => 1556023932
+                                    )
+
+                                [caller] => SimpleXMLElement Object
+                                    (
+                                        [@attributes] => Array
+                                            (
+                                                [uuid] => fb2d003f-f372-48a4-81c4-122cd4d1963e
+                                                [caller_id_name] => Outbound%20Call
+                                                [caller_id_number] => 106
+                                            )
+
+                                    )
+
+                                [consumer] => SimpleXMLElement Object
+                                    (
+                                        [uuid] => 255ab471-8636-4ace-a588-adb9b8597a32
+                                        [outgoing_uuid] => 50cf54541fa565f4015f2ec503e32514
+                                    )
+
+                            )
+
+                    )
+
+            )
+
+            */
+
+            $name = $fifo["name"];
+
+            // d1.vtpbx.com-FIFO-1
+
+            $nameArray = explode("-FIFO-", $name);
+            $queueDomainName = $nameArray[0];
+
+            $queueID = 0;
+            if(isset($nameArray[1]))
+                $queueID = intval($nameArray[1]);
+
+            // Continue only if domain is found and queue ID is > 0
+            if($queueDomainName != "" && $queueID > 0  ){
+
+                /*
+                $queueID
+                $queueDomainID
+                $consumer_count
+                $caller_count
+                $waiting_count
+                $outbound_strategy
+                $outbound_priority
+                $ring_timeout
+
+                +ARRAYS:
+                $outboundArray
+                $callersArray
+                $consumersArray
+                $bridgesArray
+                */
+
+                $queueDomainID = getDomainIDbyName($queueDomainName,$mysqli);
+
+
+                $outboundArray = array();
+                $callersArray = array();
+                $consumersArray = array();
+                $bridgesArray = array();
+
+
+
+                $consumer_count = $fifo["consumer_count"];
+                $caller_count = $fifo["caller_count"];
+                $waiting_count = $fifo["waiting_count"];
+                $outbound_strategy = $fifo["outbound_strategy"];
+                $outbound_priority = $fifo["outbound_priority"];
+                $ring_timeout = $fifo["ring_timeout"];
+
+
+                /*    OUTBOUND MEMBERS   */
+                /*
+
+                [outbound] => SimpleXMLElement Object
+                    (
+                        [member] => Array
+                            (
+                                [0] => {fifo_member_wait=nowait}user/106@d1.vtpbx.com
+                                [1] => {fifo_member_wait=nowait}user/101@d1.vtpbx.com
+                                [2] => {fifo_member_wait=nowait}user/104@d1.vtpbx.com
+                            )
+
+                    )
+
+
+
+                */
+                $outboundMembers = $fifo->outbound->member;
+                $outboundMembersCount = 0;
+
+                $outboundMembersArr = array();
+                foreach($outboundMembers as $member){
+
+                    $mTimeout = intval($member["timeout"]);
+                    $mStatus = strval($member["status"]);
+
+                    $mStartTime = strval($member["start-time"]);
+                    $mStopTime = strval($member["stop-time"]);
+                    $mNextAvailable = strval($member["next-available"]);
+                    $mLoggedOnSince = strval($member["logged-on-since"]);
+
+                    $outboundMembersCount ++;
+                    //echo "member:" .$member . "   -  ";
+
+                    // {fifo_member_wait=nowait}user/106@d1.vtpbx.com
+
+                    $memberUserDomain = explode("@",$member);
+
+                    $domain = $memberUserDomain[1];   // d1.vtpbx.com
+
+
+                    $userNotClean = $memberUserDomain[0];
+                    $userAndParams  = explode("/",$userNotClean);
+
+                    $user = $userAndParams[1];    // 101
+
+
+
+
+
+
+                    $outboundArray[] = array("user"=>$user,"domain"=>$domain, "timeout"=>$mTimeout, "status"=> $mStatus,"start-time"=>$mStartTime,"stop-time"=>$mStopTime,"next-available"=>$mNextAvailable, "logged-on-since"=> $mLoggedOnSince);
+
+                    //echo "member:  [$user]@[$domain]  \r\n";
+
+
+                }
+
+
+                /*    CALLERS  */
+                /*
+
+                [callers] => SimpleXMLElement Object
+                (
+                    [caller] => SimpleXMLElement Object
+                        (
+                            [@attributes] => Array
+                                (
+                                    [uuid] => a11bfa17-1604-4fdd-9f0f-2f2f8865913c
+                                    [status] => WAITING
+                                    [caller_id_name] => d1%20105
+                                    [caller_id_number] => 105
+                                    [timestamp] => 2019-04-23 20:35:44
+                                    [position] => 1
+                                    [slot] => 0
+                                )
+
+                        )
+
+                )
+
+
+                =============================================
+
+                [callers] => SimpleXMLElement Object
+                (
+                    [caller] => Array
+                        (
+                            [0] => SimpleXMLElement Object
+                                (
+                                    [@attributes] => Array
+                                        (
+                                            [uuid] => e8e35103-e7bc-468f-b952-5bbe56934421
+                                            [status] => WAITING
+                                            [caller_id_name] => Mac
+                                            [caller_id_number] => 102
+                                            [timestamp] => 2019-04-23 20:38:43
+                                            [position] => 1
+                                            [slot] => 0
+                                        )
+
+                                )
+
+                            [1] => SimpleXMLElement Object
+                                (
+                                    [@attributes] => Array
+                                        (
+                                            [uuid] => 6457d110-3a1e-471c-9545-b825360381ec
+                                            [status] => WAITING
+                                            [caller_id_name] => d1%20105
+                                            [caller_id_number] => 105
+                                            [timestamp] => 2019-04-23 20:38:49
+                                            [position] => 2
+                                            [slot] => 0
+                                        )
+
+                                )
+
+                        )
+
+                )
+
+
+
+
+
+
+                */
+
+                $fifoCallers = $fifo->callers->caller;
+
+                foreach($fifoCallers as $caller){
+                    $caller_callerID = strval($caller["caller_id_number"] );
+                    $caller_callerIDname = strval($caller["caller_id_name"]);
+                    $caller_status = strval($caller["status"]);
+                    $caller_position = strval($caller["position"]);
+                    $caller_timestamp = strval($caller["timestamp"]);
+                    $caller_uuid = strval($caller["uuid"]);
+                    $caller_slot = strval($caller["slot"]);
+
+                    //echo "caller:" . $caller_callerID . "   -  $caller_status  \r\n";
+                    
+                    
+                    $callersArray[]  = array(
+                        "position"=>$caller_position,
+                        "uuid"=>$caller_uuid,
+                        "caller_id_number"=>$caller_callerID,
+                        "caller_id_name"=>$caller_callerIDname,
+                        "status"=>$caller_status,
+                        "timestamp"=>$caller_timestamp,
+                        "slot" => $caller_slot
+                        );
+                    
+                }
+
+
+
+
+                /*    CONSUMERS  */
+                    
+                /*
+                    
+                  [consumers] => SimpleXMLElement Object
+                    (
+                        [consumer] => SimpleXMLElement Object
+                            (
+                                [@attributes] => Array
+                                    (
+                                        [uuid] => 1e103e36-170a-4c6b-aee7-5976e7ef69d7
+                                        [status] => WAITING
+                                        [caller_id_name] => d1%20105
+                                        [caller_id_number] => 105
+                                        [timestamp] => 2019-04-24 08:46:35
+                                    )
+
+                            )
+
+                    )
+
+
+
+                */
+
+                $fifoConsumers = $fifo->consumers->consumer;
+
+                foreach($fifoConsumers as $consumer){
+                    $consumer_uuid = strval($consumer["uuid"] );
+                    $consumer_status = strval($consumer["status"]);
+                    $consumer_caller_id_name = strval($consumer["caller_id_name"]);
+                    $consumer_caller_id_number = strval($consumer["caller_id_number"]);
+                    $consumer_timestamp = strval($consumer["timestamp"]);
+
+
+
+
+                    $consumersArray[] = array(
+                        "uuid"=>$consumer_uuid,
+                        "status"=>$consumer_status,
+                        "caller_id_name"=>$consumer_caller_id_name,
+                        "caller_id_number"=>$consumer_caller_id_number,
+                        "timestamp"=>$consumer_timestamp
+                    );
+
+
+                }
+
+                /*    BRIDGES  */
+
+                /*
+
+                [bridges] => SimpleXMLElement Object
+                (
+                    [bridge] => SimpleXMLElement Object
+                        (
+                            [@attributes] => Array
+                                (
+                                    [fifo_name] => d1.vtpbx.com-FIFO-1
+                                    [bridge_start] => 2019-04-24 08:52:01
+                                    [bridge_start_epoch] => 1556095921
+                                )
+
+                            [caller] => SimpleXMLElement Object
+                                (
+                                    [@attributes] => Array
+                                        (
+                                            [uuid] => 83715593-34d8-4ec5-9f2e-abc803e7b363
+                                            [caller_id_name] => Outbound%20Call
+                                            [caller_id_number] => 106
+                                        )
+
+                                )
+
+                            [consumer] => SimpleXMLElement Object
+                                (
+                                    [uuid] => 12db4e25-0508-45c0-9e2e-3092ce5f90cb
+                                    [outgoing_uuid] => 50cf54541fa565f4015f2ec503e32514
+                                )
+
+                        )
+
+                )
+
+
+                */
+                $fifoBridges = $fifo->bridges;
+                //print_r($fifoBridges);
+
+                //echo " =============================== \r\n ";
+                foreach($fifoBridges->bridge as  $bridge){
+
+                    //print_r($bridge);
+
+                    $bridge_fifo_name =  strval($bridge["fifo_name"]);
+                    $bridge_start_epoch = strval( $bridge["bridge_start_epoch"] );
+
+                    // caller
+                    $caller = $bridge->caller;
+
+
+                    $bridge_caller_uuid = strval($bridge->caller["uuid"]);
+                    $bridge_caller_id_name = strval($bridge->caller["caller_id_name"]);
+                    $bridge_caller_id_number = strval($bridge->caller["caller_id_number"]);
+
+                    // consumer
+
+                    $bridge_consumer_uuid = strval($bridge->consumer->uuid);
+                    $bridge_consumer_outgoing_uuid = strval($bridge->consumer->outgoing_uuid);
+
+
+
+                    $bridgesArray[] = array(
+                        "fifo_name"=>$bridge_fifo_name,
+                        "bridge_start_epoch"=>$bridge_start_epoch,
+
+                        "caller_uuid"=>$bridge_caller_uuid,
+                        "caller_id_name"=>$bridge_caller_id_name,
+                        "caller_id_number"=>$bridge_caller_id_number,
+                        "consumer_uuid"=>$bridge_consumer_uuid,
+                        "consumer_outgoing_uuid"=>$bridge_consumer_outgoing_uuid
+
+
+                    );
+
+                    // Update RT table, make sure the call is marked as ANSWERED
+                    setQueueCallAsAnswered($bridge_start_epoch,$bridge_caller_id_number,$bridge_caller_uuid,$queueID,$queueDomainID,$mysqli);
+
+
+
+
+                }
+
+                //echo " =============================== \r\n ";
+
+
+
+
+
+
+
+
+
+
+                //echo "Queue [$name] , callers: [$caller_count], consumers: [$consumer_count], waiting: [$waiting_count], outbound members: [$outboundMembersCount]  \r\n ";
+
+                //
+                // INSERT queue details into DB
+                //
+
+                //todo: INSERT to DB.
+
+                /*
+                $queueID
+                $queueDomainID
+                $consumer_count
+                $caller_count
+                $waiting_count
+                $outbound_strategy
+                $outbound_priority
+                $ring_timeout
+
+                +ARRAYS:
+                $outboundArray
+                $callersArray
+                $consumersArray
+                $bridgesArray
+                */
+
+                $outboundArrayJson = json_encode($outboundArray);
+                $callersArrayJson =  json_encode($callersArray);
+                $consumersArrayJson  =  json_encode($consumersArray );
+                $bridgesArrayJson  = json_encode($bridgesArray );
+
+
+
+
+                saveQueuesRtData($queueDomainID,$queueID,$consumer_count,$caller_count,$waiting_count,$outbound_strategy,$outbound_priority,$ring_timeout,$outboundArrayJson,$callersArrayJson,$consumersArrayJson,$bridgesArrayJson,$mysqli);
+
+
+            }
+
+
+        }  // DONE - loop over queues
+
+
+
+
+
+
+
+
+
+
+
+    }
+
+
+
+
+
+
+    // Done
+    $end_time = microtime(true);
+    $execTime = round( (($end_time - $start_time)*1000), 3);
+
+
+    // array prepared, need to update DB table.
+
+    echo "loop exec time:[$execTime]ms \r\n";
+
+
+
+    usleep(100000); // PAUSE 0.5s
+    //break;
+   // break;
+}
+
+?>

@@ -1,0 +1,177 @@
+<?php
+$dir = __DIR__ ;
+$dir = str_replace("local_scripts","",$dir);
+
+include_once $dir."/settings.php";
+include_once $dir."/db_connect.php";
+include_once $dir."/functions.php";
+include_once $dir."admin_panel/engine/functions_admin_portal.php";
+include_once $dir."/fs_configuration/functions_vtpbx_fs.php";
+
+include_once 'functions_local_scripts.php';
+include_once 'functions_event_socket.php';
+
+
+
+while(true){
+
+
+// prepare an iteration :
+    $start_time = microtime(true);
+    $password = "ClueCon";  // default
+    $port = "8021";  // default
+    $host = "127.0.0.1";  // default
+
+    $fp = event_socket_create($host, $port, $password);
+
+
+
+
+//0. Get the list of users (from all PBXes)
+    $customerIDs = getCustomerIDsList($mysqli);
+    foreach($customerIDs as $customerID){
+
+        $userIDs = getUserIdsArrayForOneCustomer($customerID,$mysqli);
+
+        foreach($userIDs as $userID ){
+
+            $messagesArray = array();
+
+            $userDetails = getUserDetailsByID($userID,$mysqli);
+            /*
+
+                    $response["id"] = $id;
+                    $response["customer"] = $customer;
+                    $response["name"] = $name;
+                    $response["username"] = $username;
+                    $response["type"] = $type;
+                    $response["sip_password"] = $sip_password;
+                    $response["record_internal"] = $record_internal;
+                    $response["record_incoming"] = $record_incoming;
+                    $response["record_external"] = $record_external;
+                    $response["vm_password"] = $vm_password;
+                    $response["domain"] = $domain;
+
+                    $response["vm_enable"] = $vm_enable;
+                    $response["vm_greeting"] = $vm_greeting;
+                    $response["vm_timeout"] = $vm_timeout;
+                    $response["call_forwarding"] = $call_forwarding;
+                    $response["external_caller_id"] = $external_caller_id;
+
+             */
+
+            $username = $userDetails["username"];
+            $domainID = $userDetails["domain"];
+            $domainName = getDomainNameByID($domainID,$mysqli);
+            $userID = $userDetails["id"];
+
+            // get VM messages for one user:
+
+
+            $cmd = "api vm_list $username@$domainName xml";
+
+            //echo "calling:  [$cmd]";
+            //get list of queues from FS:
+            $response = event_socket_request($fp, $cmd);
+
+            //echo "checking the XML";
+            $xmlVMlist = simplexml_load_string($response);
+
+            if ($xmlVMlist === false) {
+                echo "Failed loading XML: ";
+
+            } else {
+                //echo "Loaded XML!";
+
+                foreach($xmlVMlist->message as $message) {
+                    /*
+
+                    (
+                        [created_epoch] => 1585318957
+                        [read_epoch] => 0
+                        [username] => 103
+                        [domain] => d1.callertech.net
+                        [folder] => inbox
+                        [path] => /var/lib/freeswitch/storage/voicemail/default/d1.callertech.net/103/msg_82b10ef8-46af-4785-8ef7-f906bdf50b34.wav
+                        [uuid] => d139b1de-8c73-4033-8191-d9119a767967
+                        [cid-name] => 101
+                        [cid-number] => 101
+                        [message-len] => 3
+                    )
+
+                     */
+
+
+
+                    $created_epoch = $message->created_epoch;
+                    $read_epoch = $message->read_epoch;
+                    $folder = $message->folder;
+                    $path = $message->path;
+                    $uuid = $message->uuid;
+                    $cid_name = $message->{'cid-name'};
+                    $cid_number = $message->{'cid-number'};
+                    $message_len= $message->{'message-len'};
+
+                    //error_log("[$uuid] created: [$created_epoch] read: [$read_epoch]".PHP_EOL);
+
+
+                    // build an array to insert data of one user:
+
+                    $userVMmessage = array(
+                        "uuid" => $uuid,
+                        "customer" => $customerID,
+                        "domain_id" => $domainID,
+                        "domain_name" => $domainName,
+                        "username" => $username,
+                        "user_id" =>  $userID,
+                        "time_created" => $created_epoch,
+                        "time_read" => $read_epoch,
+                        "folder" => $folder,
+                        "path" => $path,
+                        "cid_name" => $cid_name,
+                        "cid_number" => $cid_number,
+                        "message_len" => $message_len
+                    );
+
+
+
+                    $messagesArray[] = $userVMmessage;
+
+                }
+
+
+            }
+
+
+
+            // update user's VM messages list.
+
+
+
+
+            updateVMmessagesListForOneUser($userID,$messagesArray,$mysqli);
+
+            }  // foreach - users
+
+    } // foreach - customers
+
+
+
+    // Done
+    $end_time = microtime(true);
+    $execTime = round( (($end_time - $start_time)*1000), 3);
+
+
+    // array prepared, need to update DB table.
+
+    echo "loop exec time:[$execTime]ms \r\n";
+
+
+
+    usleep(1000000); // PAUSE 1s
+    //break;
+
+    //break;
+}
+
+?>

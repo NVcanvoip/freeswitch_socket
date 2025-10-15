@@ -1,0 +1,13 @@
+nohup: ignoring input
+Connected to FreeSWITCH event socket
+Auth response: Content-Type: auth/request
+
+Content-Type: command/reply
+Reply-Text: +OK accepted
+
+
+Events subscription: Content-Type: command/reply
+Reply-Text: +OK event listener enabled plain
+
+
+Listening for mod_audio_stream::play events...
