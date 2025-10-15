@@ -143,8 +143,8 @@ class Channel {
     }
 
 //        await setTimeout(3000); // for echo test
-//        this.sendAudio(this.rtpAdress, this.port); // for echo test
-        this.sendAudioSTT(); // to DEEPGRAM!!!!
+        this.sendAudio(this.rtpAdress, this.port); // for echo test
+//        this.sendAudioSTT(); // to DEEPGRAM!!!!
     }
 
     cleanup() {
@@ -179,6 +179,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   call.event_json('CHANNEL_ANSWER');
   call.event_json('CHANNEL_HANGUP_COMPLETE');
   call.event_json('CHANNEL_DESTROY');
+
   call.execute('answer');
 
   const cleanupChannel = (reason) => {
@@ -209,6 +210,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
 
   call.once('freeswitch_disconnect', function() {
     cleanupChannel('freeswitch_disconnect');
+
   });
 
 })
