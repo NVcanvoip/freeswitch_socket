@@ -2,6 +2,7 @@ const { FreeSwitchServer, once } = require('esl');
 const WebSocket = require('ws');
 const dgram = require('dgram');
 const fs = require('fs');
+const fsPromises = fs.promises;
 const path = require('path');
 const EventEmitter = require('events');
 const { setTimeout } = require('timers/promises');
@@ -62,6 +63,10 @@ class Channel {
         this.outboundQueue = [];
         this.isFlushingOutbound = false;
         this.pendingOutboundBuffer = Buffer.alloc(0);
+        this.uuid = null;
+        this.recordingStream = null;
+        this.recordingFilePath = null;
+        this.recordingBytesWritten = 0;
 
         this.sock.on('listening', () => {
             this.socketReady = true;
@@ -209,6 +214,7 @@ class Channel {
                 return;
             }
 
+            this.recordPayload(payloadBuffer);
             this.enqueueOutbound(payloadBuffer);
         });
     }
@@ -288,6 +294,7 @@ class Channel {
             this.port = undefined;
             throw error;
         }
+        this.uuid = uuid;
         this.rtpAdress='127.0.0.1';
         this.sock.bind(this.dport);
         this.receiveAudio();
@@ -337,11 +344,104 @@ class Channel {
         this.isFlushingOutbound = false;
         this.pendingOutboundBuffer = Buffer.alloc(0);
 
+        this.finishRecording();
+
         releaseRtpPort(this.dport);
         releaseRtpPort(this.port);
         this.dport = undefined;
         this.port = undefined;
         this.socketReady = false;
+    }
+
+
+    ensureRecordingStream() {
+        if (this.recordingStream) {
+            return;
+        }
+
+        try {
+            const recordingsDir = path.join(__dirname, 'recordings');
+            if (!fs.existsSync(recordingsDir)) {
+                fs.mkdirSync(recordingsDir, { recursive: true });
+            }
+
+            const fileName = `${this.uuid || 'channel'}_${Date.now()}.wav`;
+            this.recordingFilePath = path.join(recordingsDir, fileName);
+            const header = this.createWavHeader(0);
+            this.recordingStream = fs.createWriteStream(this.recordingFilePath);
+            this.recordingStream.write(header);
+        } catch (error) {
+            console.error('[Recording] Failed to initialize recording stream:', error);
+            this.recordingStream = null;
+            this.recordingFilePath = null;
+            this.recordingBytesWritten = 0;
+        }
+    }
+
+
+    recordPayload(buffer) {
+        if (!buffer || buffer.length === 0) {
+            return;
+        }
+
+        this.ensureRecordingStream();
+        if (!this.recordingStream) {
+            return;
+        }
+
+        this.recordingBytesWritten += buffer.length;
+        if (!this.recordingStream.write(buffer)) {
+            this.recordingStream.once('drain', () => {});
+        }
+    }
+
+
+    finishRecording() {
+        if (!this.recordingStream || !this.recordingFilePath) {
+            return;
+        }
+
+        const dataLength = this.recordingBytesWritten;
+        const filePath = this.recordingFilePath;
+        this.recordingStream.end(async () => {
+            try {
+                const header = this.createWavHeader(dataLength);
+                const fileHandle = await fsPromises.open(filePath, 'r+');
+                await fileHandle.write(header, 0, header.length, 0);
+                await fileHandle.close();
+            } catch (error) {
+                console.error('[Recording] Failed to finalize WAV header:', error);
+            }
+        });
+
+        this.recordingStream = null;
+        this.recordingFilePath = null;
+        this.recordingBytesWritten = 0;
+    }
+
+
+    createWavHeader(dataSize) {
+        const sampleRate = 8000;
+        const bitsPerSample = 16;
+        const channels = 1;
+        const byteRate = sampleRate * channels * bitsPerSample / 8;
+        const blockAlign = channels * bitsPerSample / 8;
+
+        const buffer = Buffer.alloc(44);
+        buffer.write('RIFF', 0);
+        buffer.writeUInt32LE(36 + dataSize, 4);
+        buffer.write('WAVE', 8);
+        buffer.write('fmt ', 12);
+        buffer.writeUInt32LE(16, 16);
+        buffer.writeUInt16LE(1, 20);
+        buffer.writeUInt16LE(channels, 22);
+        buffer.writeUInt32LE(sampleRate, 24);
+        buffer.writeUInt32LE(byteRate, 28);
+        buffer.writeUInt16LE(blockAlign, 32);
+        buffer.writeUInt16LE(bitsPerSample, 34);
+        buffer.write('data', 36);
+        buffer.writeUInt32LE(dataSize, 40);
+        return buffer;
     }
 }
 
