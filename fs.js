@@ -8,6 +8,12 @@ const { setTimeout } = require('timers/promises');
 const { v4: uuidv4 } = require('uuid');
 
 
+const FRAME_SIZE = 160; // 20 ms at 8 kHz
+const BYTES_PER_SAMPLE = 2; // 16-bit PCM
+const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE; // 320 bytes per frame
+const FRAME_INTERVAL_MS = 20; // 50 packets per second
+
+
 api_key = "aaa"
 //deepgram_ws_url = "wss://api.deepgram.com/v1/listen?punctuate=true&model=nova-2&language=ru&sample_rate=8000&encoding=mulaw&smart_format=true&interim_results=true&utterance_end_ms=1000&vad_events=true&endpointing=300"
 deepgram_ws_url = "wss://api.deepgram.com/v1/listen?punctuate=true&model=nova-2&language=ru&sample_rate=8000&encoding=mulaw&smart_format=true&interim_results=true&utterance_end_ms=1000&vad_events=true&endpointing=300"
@@ -55,6 +61,7 @@ class Channel {
         this.dport = undefined;
         this.outboundQueue = [];
         this.isFlushingOutbound = false;
+        this.pendingOutboundBuffer = Buffer.alloc(0);
 
         this.sock.on('listening', () => {
             this.socketReady = true;
@@ -71,6 +78,7 @@ class Channel {
             this.socketReady = false;
             this.outboundQueue = [];
             this.isFlushingOutbound = false;
+            this.pendingOutboundBuffer = Buffer.alloc(0);
             releaseRtpPort(this.dport);
             releaseRtpPort(this.port);
             this.dport = undefined;
@@ -85,7 +93,8 @@ class Channel {
             return;
         }
 
-        this.outboundQueue.push(buffer);
+        const normalizedBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+        this.outboundQueue.push(normalizedBuffer);
         this.flushOutboundQueue();
     }
 
@@ -101,31 +110,56 @@ class Channel {
 
         this.isFlushingOutbound = true;
 
-        const sendNext = () => {
-            if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
-                this.isFlushingOutbound = false;
-                return;
-            }
+        const sendFrames = async () => {
+            try {
+                while (this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
+                    while (this.pendingOutboundBuffer.length < FRAME_BYTES) {
+                        const nextChunk = this.outboundQueue.shift();
+                        if (!nextChunk) {
+                            return;
+                        }
 
-            const nextPacket = this.outboundQueue.shift();
-            if (!nextPacket) {
-                this.isFlushingOutbound = false;
-                return;
-            }
+                        this.pendingOutboundBuffer = this.pendingOutboundBuffer.length === 0
+                            ? nextChunk
+                            : Buffer.concat([this.pendingOutboundBuffer, nextChunk]);
+                    }
 
-            this.sock.send(nextPacket, this.port, this.rtpAdress, (error) => {
-                if (error) {
-                    console.error('[RTP] Ошибка отправки пакета из очереди:', error);
-                    // При ошибке прекращаем обработку, чтобы не зациклиться на ошибочном состоянии
-                    this.isFlushingOutbound = false;
-                    return;
+                    const frame = this.pendingOutboundBuffer.subarray(0, FRAME_BYTES);
+                    this.pendingOutboundBuffer = this.pendingOutboundBuffer.subarray(FRAME_BYTES);
+
+                    await this.sendPcmFrame(frame);
+                    await setTimeout(FRAME_INTERVAL_MS);
                 }
+            } catch (error) {
+                console.error('[RTP] Ошибка отправки PCM кадра:', error);
+            } finally {
+                this.isFlushingOutbound = false;
 
-                setImmediate(sendNext);
-            });
+                if ((this.pendingOutboundBuffer.length >= FRAME_BYTES || this.outboundQueue.length > 0) &&
+                    this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
+                    this.flushOutboundQueue();
+                }
+            }
         };
 
-        setImmediate(sendNext);
+        sendFrames();
+    }
+
+
+    sendPcmFrame(frame) {
+        return new Promise((resolve, reject) => {
+            if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
+                return reject(new Error('Сокет недоступен для отправки PCM кадра'));
+            }
+
+            this.sock.send(frame, this.port, this.rtpAdress, (error) => {
+                if (error) {
+                    reject(error);
+                } else {
+                    resolve();
+                }
+            });
+        });
     }
 
 
@@ -378,6 +412,7 @@ class Channel {
 
         this.outboundQueue = [];
         this.isFlushingOutbound = false;
+        this.pendingOutboundBuffer = Buffer.alloc(0);
         releaseRtpPort(this.dport);
         releaseRtpPort(this.port);
         this.dport = undefined;
@@ -408,6 +443,7 @@ class Channel {
 
         this.outboundQueue = [];
         this.isFlushingOutbound = false;
+        this.pendingOutboundBuffer = Buffer.alloc(0);
         releaseRtpPort(this.dport);
         releaseRtpPort(this.port);
         this.dport = undefined;
