@@ -51,6 +51,8 @@ class Channel {
         this.socketReady = false;
         this.bufferQueue = new EventEmitter();
         this.bufferQueue.setMaxListeners(100);
+        this.port = undefined;
+        this.dport = undefined;
 
         this.sock.on('listening', () => {
             this.socketReady = true;
@@ -65,7 +67,9 @@ class Channel {
         this.sock.on('close', () => {
             this.socketReady = false;
             releaseRtpPort(this.dport);
+            releaseRtpPort(this.port);
             this.dport = undefined;
+            this.port = undefined;
             this.sock = null;
         });
     }
@@ -149,8 +153,15 @@ class Channel {
     }
 
     async init(call, uuid) {
-        this.port = 8025;
-        this.dport = allocateRtpPort();
+        try {
+            this.port = allocateRtpPort();
+            this.dport = allocateRtpPort();
+        } catch (error) {
+            releaseRtpPort(this.port);
+            this.port = undefined;
+            throw error;
+        }
+
         this.rtpAdress='127.0.0.1';
         this.sock.bind(this.dport);
         this.receiveAudio();
@@ -221,6 +232,34 @@ class Channel {
 
         releaseRtpPort(this.dport);
         this.dport = undefined;
+        this.socketReady = false;
+    }
+
+    cleanup() {
+        this.bufferQueue.removeAllListeners();
+        if (this.deepgramWs) {
+            try {
+                this.deepgramWs.close();
+            } catch (error) {
+                console.error('[Deepgram] Ошибка при закрытии WebSocket:', error);
+            }
+            this.deepgramWs = null;
+        }
+
+        if (this.sock) {
+            this.sock.removeAllListeners('message');
+            try {
+                this.sock.close();
+            } catch (error) {
+                console.error('[RTP] Ошибка при закрытии сокета:', error);
+            }
+            this.sock = null;
+        }
+
+        releaseRtpPort(this.dport);
+        releaseRtpPort(this.port);
+        this.dport = undefined;
+        this.port = undefined;
         this.socketReady = false;
     }
 }
