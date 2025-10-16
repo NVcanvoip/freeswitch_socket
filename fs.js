@@ -48,17 +48,25 @@ class Channel {
         this.seqNum = 0;
         this.timestamp = 0;
         this.sock = dgram.createSocket('udp4');
+        this.socketReady = false;
         this.bufferQueue = new EventEmitter();
         this.bufferQueue.setMaxListeners(100);
 
+        this.sock.on('listening', () => {
+            this.socketReady = true;
+        });
+
         this.sock.on('error', (error) => {
             console.error('[RTP] Ошибка сокета:', error);
+            this.socketReady = false;
             this.sock.close();
         });
 
         this.sock.on('close', () => {
+            this.socketReady = false;
             releaseRtpPort(this.dport);
             this.dport = undefined;
+            this.sock = null;
         });
     }
 
@@ -112,12 +120,31 @@ class Channel {
 
     sendAudio(address, port) {
         this.bufferQueue.on('data', (audioData) => {
-            if (!audioData) return;
-//		const rtpPacket = this.buildRtpPacket(audioData);
-    	const rtpPacket = audioData;
-    	setTimeout(1000).then(() => {
-        	    this.sock.send(rtpPacket, port, address);
-    	});
+            if (!audioData) {
+                return;
+            }
+
+            const rtpPacket = audioData;
+            setTimeout(1000).then(() => {
+                if (!this.sock || !this.socketReady) {
+                    console.warn('[RTP] Попытка отправить пакет при неактивном сокете, пакет отброшен');
+                    return;
+                }
+
+                try {
+                    this.sock.send(rtpPacket, port, address, (error) => {
+                        if (error) {
+                            console.error('[RTP] Ошибка отправки пакета:', error);
+                        }
+                    });
+                } catch (error) {
+                    if (error && error.code === 'ERR_SOCKET_DGRAM_NOT_RUNNING') {
+                        console.warn('[RTP] Попытка отправить через остановленный сокет:', error.message || error);
+                    } else {
+                        console.error('[RTP] Непредвиденная ошибка отправки пакета:', error);
+                    }
+                }
+            });
         });
     }
 
@@ -170,6 +197,32 @@ class Channel {
         releaseRtpPort(this.dport);
         this.dport = undefined;
     }
+
+    cleanup() {
+        this.bufferQueue.removeAllListeners();
+        if (this.deepgramWs) {
+            try {
+                this.deepgramWs.close();
+            } catch (error) {
+                console.error('[Deepgram] Ошибка при закрытии WebSocket:', error);
+            }
+            this.deepgramWs = null;
+        }
+
+        if (this.sock) {
+            this.sock.removeAllListeners('message');
+            try {
+                this.sock.close();
+            } catch (error) {
+                console.error('[RTP] Ошибка при закрытии сокета:', error);
+            }
+            this.sock = null;
+        }
+
+        releaseRtpPort(this.dport);
+        this.dport = undefined;
+        this.socketReady = false;
+    }
 }
 
 
@@ -179,7 +232,6 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   call.event_json('CHANNEL_ANSWER');
   call.event_json('CHANNEL_HANGUP_COMPLETE');
   call.event_json('CHANNEL_DESTROY');
-
   call.execute('answer');
 
   const cleanupChannel = (reason) => {
@@ -210,7 +262,6 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
 
   call.once('freeswitch_disconnect', function() {
     cleanupChannel('freeswitch_disconnect');
-
   });
 
 })
