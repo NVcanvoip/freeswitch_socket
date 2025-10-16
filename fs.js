@@ -21,6 +21,26 @@ header = {
 const server = new FreeSwitchServer()
 const channels = {};
 
+const RTP_PORT_MIN = 40000;
+const RTP_PORT_MAX = 50000;
+const allocatedPorts = new Set();
+
+function allocateRtpPort() {
+    for (let port = RTP_PORT_MIN; port <= RTP_PORT_MAX; port++) {
+        if (!allocatedPorts.has(port)) {
+            allocatedPorts.add(port);
+            return port;
+        }
+    }
+    throw new Error('Нет доступных RTP портов в заданном диапазоне');
+}
+
+function releaseRtpPort(port) {
+    if (port !== undefined) {
+        allocatedPorts.delete(port);
+    }
+}
+
 
 class Channel {
     constructor() {
@@ -28,8 +48,84 @@ class Channel {
         this.seqNum = 0;
         this.timestamp = 0;
         this.sock = dgram.createSocket('udp4');
+        this.socketReady = false;
         this.bufferQueue = new EventEmitter();
         this.bufferQueue.setMaxListeners(100);
+        this.port = undefined;
+        this.dport = undefined;
+        this.outboundQueue = [];
+        this.isFlushingOutbound = false;
+
+        this.sock.on('listening', () => {
+            this.socketReady = true;
+            this.flushOutboundQueue();
+        });
+
+        this.sock.on('error', (error) => {
+            console.error('[RTP] Ошибка сокета:', error);
+            this.socketReady = false;
+            this.sock.close();
+        });
+
+        this.sock.on('close', () => {
+            this.socketReady = false;
+            this.outboundQueue = [];
+            this.isFlushingOutbound = false;
+            releaseRtpPort(this.dport);
+            releaseRtpPort(this.port);
+            this.dport = undefined;
+            this.port = undefined;
+            this.sock = null;
+        });
+    }
+
+
+    enqueueOutbound(buffer) {
+        if (!buffer || buffer.length === 0) {
+            return;
+        }
+
+        this.outboundQueue.push(buffer);
+        this.flushOutboundQueue();
+    }
+
+
+    flushOutboundQueue() {
+        if (this.isFlushingOutbound) {
+            return;
+        }
+
+        if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
+            return;
+        }
+
+        this.isFlushingOutbound = true;
+
+        const sendNext = () => {
+            if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
+                this.isFlushingOutbound = false;
+                return;
+            }
+
+            const nextPacket = this.outboundQueue.shift();
+            if (!nextPacket) {
+                this.isFlushingOutbound = false;
+                return;
+            }
+
+            this.sock.send(nextPacket, this.port, this.rtpAdress, (error) => {
+                if (error) {
+                    console.error('[RTP] Ошибка отправки пакета из очереди:', error);
+                    // При ошибке прекращаем обработку, чтобы не зациклиться на ошибочном состоянии
+                    this.isFlushingOutbound = false;
+                    return;
+                }
+
+                setImmediate(sendNext);
+            });
+        };
+
+        setImmediate(sendNext);
     }
 
 
@@ -63,41 +159,105 @@ class Channel {
 	});
 
         this.deepgramWs.on("message", async (message) => {
+            const payloadBuffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
+            const jsonPayload = this.parseDeepgramJsonPayload(payloadBuffer);
+
+            if (jsonPayload) {
+                const { response } = jsonPayload;
+                console.log("[Deepgram] Response received: ", response.is_final, response.speech_final);
+                if (response.is_final === true || response.speech_final === true) {
+                    const transcript = response.channel.alternatives?.[0]?.transcript;
+                    if (transcript) {
+                        console.log("Transcript: ", transcript);
+                    }
+                }
+                console.log("[Deepgram] Response received: ", JSON.stringify(response, null, 2));
+                return;
+            }
+
+            this.enqueueOutbound(payloadBuffer);
+        });
+    }
+
+
+    parseDeepgramJsonPayload(buffer) {
+        if (!buffer || buffer.length === 0) {
+            return null;
+        }
+
+        let index = 0;
+        const { length } = buffer;
+        while (index < length) {
+            const byte = buffer[index];
+            if (byte === 0x20 || byte === 0x09 || byte === 0x0A || byte === 0x0D) {
+                index += 1;
+                continue;
+            }
+            break;
+        }
+
+        if (index >= length) {
+            return null;
+        }
+
+        const firstByte = buffer[index];
+        if (firstByte !== 0x7B && firstByte !== 0x5B) {
+            return null;
+        }
+
         try {
-            const response = JSON.parse(message);
-                console.log("[Deepgram] Response received: ", response.is_final , response.speech_final);
-	if (response.is_final === true || response.speech_final === true) {
-	     const transcript = response.channel.alternatives[0].transcript;
-	     console.log("Transcript: ", transcript);
-	}
-                console.log("[Deepgram] Response received: ",JSON.stringify(response, null, 2));
-                console.log(response);
-//                console.log(response.channel.alternatives[0].transcript);
-	    } catch (error) {
-    	console.error("[Deepgram] Error processing message: ", error, "Message: ", message);
-	    }
-    });
+            const text = buffer.toString('utf8');
+            const response = JSON.parse(text);
+            return { response };
+        } catch (error) {
+            return null;
+        }
     }
 
 
     sendAudio(address, port) {
         this.bufferQueue.on('data', (audioData) => {
-            if (!audioData) return;
-//		const rtpPacket = this.buildRtpPacket(audioData);
-    	const rtpPacket = audioData;
-    	setTimeout(1000).then(() => {
-        	    this.sock.send(rtpPacket, port, address);
-    	});
+            if (!audioData) {
+                return;
+            }
+
+            const rtpPacket = audioData;
+            setTimeout(1000).then(() => {
+                if (!this.sock || !this.socketReady) {
+                    console.warn('[RTP] Попытка отправить пакет при неактивном сокете, пакет отброшен');
+                    return;
+                }
+
+                try {
+                    this.sock.send(rtpPacket, port, address, (error) => {
+                        if (error) {
+                            console.error('[RTP] Ошибка отправки пакета:', error);
+                        }
+                    });
+                } catch (error) {
+                    if (error && error.code === 'ERR_SOCKET_DGRAM_NOT_RUNNING') {
+                        console.warn('[RTP] Попытка отправить через остановленный сокет:', error.message || error);
+                    } else {
+                        console.error('[RTP] Непредвиденная ошибка отправки пакета:', error);
+                    }
+                }
+            });
         });
     }
 
     async init(call, uuid) {
-        this.port = 8025;
-        this.dport = 10026;
-    this.rtpAdress='127.0.0.1';
+        try {
+            this.port = allocateRtpPort();
+            this.dport = allocateRtpPort();
+        } catch (error) {
+            releaseRtpPort(this.port);
+            this.port = undefined;
+            throw error;
+        }
+        this.rtpAdress='127.0.0.1';
         this.sock.bind(this.dport);
         this.receiveAudio();
-        
+
     try {
 	  const result = await call.unicast_uuid(uuid, {
             'local-ip': this.rtpAdress,
@@ -116,6 +276,36 @@ class Channel {
 //        this.sendAudio(this.rtpAdress, this.port); // for echo test
         this.sendAudioSTT(); // to DEEPGRAM!!!!
     }
+
+    cleanup() {
+        this.bufferQueue.removeAllListeners();
+        if (this.deepgramWs) {
+            try {
+                this.deepgramWs.close();
+            } catch (error) {
+                console.error('[Deepgram] Ошибка при закрытии WebSocket:', error);
+            }
+            this.deepgramWs = null;
+        }
+
+        if (this.sock) {
+            this.sock.removeAllListeners('message');
+            try {
+                this.sock.close();
+            } catch (error) {
+                console.error('[RTP] Ошибка при закрытии сокета:', error);
+            }
+            this.sock = null;
+        }
+
+        this.outboundQueue = [];
+        this.isFlushingOutbound = false;
+        releaseRtpPort(this.dport);
+        releaseRtpPort(this.port);
+        this.dport = undefined;
+        this.port = undefined;
+        this.socketReady = false;
+    }
 }
 
 
@@ -123,13 +313,38 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   console.log('AAAAAAAAAAAAAAAAAAAAAAAAA ',uuid);
   call.noevents();
   call.event_json('CHANNEL_ANSWER');
+  call.event_json('CHANNEL_HANGUP_COMPLETE');
+  call.event_json('CHANNEL_DESTROY');
   call.execute('answer');
+
+  const cleanupChannel = (reason) => {
+    const fsChannel = channels[uuid];
+    if (!fsChannel) {
+      return;
+    }
+
+    console.log('Call cleanup triggered by', reason, uuid);
+    delete channels[uuid];
+    fsChannel.cleanup();
+  };
 
   call.on('CHANNEL_ANSWER', async function({headers,body}) {
     console.log('11111111111Call was answered');
      const fsChannel = new Channel();
      await fsChannel.init(call, uuid);
      channels[uuid] = fsChannel;
+  });
+
+  call.on('CHANNEL_HANGUP_COMPLETE', function() {
+    cleanupChannel('CHANNEL_HANGUP_COMPLETE');
+  });
+
+  call.on('CHANNEL_DESTROY', function() {
+    cleanupChannel('CHANNEL_DESTROY');
+  });
+
+  call.once('freeswitch_disconnect', function() {
+    cleanupChannel('freeswitch_disconnect');
   });
 
 })
