@@ -53,9 +53,12 @@ class Channel {
         this.bufferQueue.setMaxListeners(100);
         this.port = undefined;
         this.dport = undefined;
+        this.outboundQueue = [];
+        this.isFlushingOutbound = false;
 
         this.sock.on('listening', () => {
             this.socketReady = true;
+            this.flushOutboundQueue();
         });
 
         this.sock.on('error', (error) => {
@@ -66,12 +69,63 @@ class Channel {
 
         this.sock.on('close', () => {
             this.socketReady = false;
+            this.outboundQueue = [];
+            this.isFlushingOutbound = false;
             releaseRtpPort(this.dport);
             releaseRtpPort(this.port);
             this.dport = undefined;
             this.port = undefined;
             this.sock = null;
         });
+    }
+
+
+    enqueueOutbound(buffer) {
+        if (!buffer || buffer.length === 0) {
+            return;
+        }
+
+        this.outboundQueue.push(buffer);
+        this.flushOutboundQueue();
+    }
+
+
+    flushOutboundQueue() {
+        if (this.isFlushingOutbound) {
+            return;
+        }
+
+        if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
+            return;
+        }
+
+        this.isFlushingOutbound = true;
+
+        const sendNext = () => {
+            if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
+                this.isFlushingOutbound = false;
+                return;
+            }
+
+            const nextPacket = this.outboundQueue.shift();
+            if (!nextPacket) {
+                this.isFlushingOutbound = false;
+                return;
+            }
+
+            this.sock.send(nextPacket, this.port, this.rtpAdress, (error) => {
+                if (error) {
+                    console.error('[RTP] Ошибка отправки пакета из очереди:', error);
+                    // При ошибке прекращаем обработку, чтобы не зациклиться на ошибочном состоянии
+                    this.isFlushingOutbound = false;
+                    return;
+                }
+
+                setImmediate(sendNext);
+            });
+        };
+
+        setImmediate(sendNext);
     }
 
 
@@ -104,21 +158,28 @@ class Channel {
 	    });
 	});
 
-        this.deepgramWs.on("message", async (message) => {
-        try {
-            const response = JSON.parse(message);
+        this.deepgramWs.on("message", async (message, isBinary) => {
+            if (isBinary || Buffer.isBuffer(message)) {
+                this.enqueueOutbound(Buffer.isBuffer(message) ? message : Buffer.from(message));
+                return;
+            }
+
+            const textMessage = message.toString();
+
+            try {
+                const response = JSON.parse(textMessage);
                 console.log("[Deepgram] Response received: ", response.is_final , response.speech_final);
-	if (response.is_final === true || response.speech_final === true) {
-	     const transcript = response.channel.alternatives[0].transcript;
-	     console.log("Transcript: ", transcript);
-	}
+                if (response.is_final === true || response.speech_final === true) {
+                    const transcript = response.channel.alternatives[0].transcript;
+                    console.log("Transcript: ", transcript);
+                }
                 console.log("[Deepgram] Response received: ",JSON.stringify(response, null, 2));
                 console.log(response);
 //                console.log(response.channel.alternatives[0].transcript);
-	    } catch (error) {
-    	console.error("[Deepgram] Error processing message: ", error, "Message: ", message);
-	    }
-    });
+            } catch (error) {
+                console.log("[Deepgram] Неподдерживаемое текстовое сообщение:", textMessage);
+            }
+        });
     }
 
 
@@ -161,7 +222,6 @@ class Channel {
             this.port = undefined;
             throw error;
         }
-
         this.rtpAdress='127.0.0.1';
         this.sock.bind(this.dport);
         this.receiveAudio();
@@ -256,6 +316,36 @@ class Channel {
             this.sock = null;
         }
 
+        releaseRtpPort(this.dport);
+        releaseRtpPort(this.port);
+        this.dport = undefined;
+        this.port = undefined;
+        this.socketReady = false;
+    }
+
+    cleanup() {
+        this.bufferQueue.removeAllListeners();
+        if (this.deepgramWs) {
+            try {
+                this.deepgramWs.close();
+            } catch (error) {
+                console.error('[Deepgram] Ошибка при закрытии WebSocket:', error);
+            }
+            this.deepgramWs = null;
+        }
+
+        if (this.sock) {
+            this.sock.removeAllListeners('message');
+            try {
+                this.sock.close();
+            } catch (error) {
+                console.error('[RTP] Ошибка при закрытии сокета:', error);
+            }
+            this.sock = null;
+        }
+
+        this.outboundQueue = [];
+        this.isFlushingOutbound = false;
         releaseRtpPort(this.dport);
         releaseRtpPort(this.port);
         this.dport = undefined;
