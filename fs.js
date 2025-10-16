@@ -161,6 +161,7 @@ class Channel {
             this.port = undefined;
             throw error;
         }
+
         this.rtpAdress='127.0.0.1';
         this.sock.bind(this.dport);
         this.receiveAudio();
@@ -180,8 +181,58 @@ class Channel {
     }
 
 //        await setTimeout(3000); // for echo test
-//        this.sendAudio(this.rtpAdress, this.port); // for echo test
-        this.sendAudioSTT(); // to DEEPGRAM!!!!
+        this.sendAudio(this.rtpAdress, this.port); // for echo test
+//        this.sendAudioSTT(); // to DEEPGRAM!!!!
+    }
+
+    cleanup() {
+        this.bufferQueue.removeAllListeners();
+        if (this.deepgramWs) {
+            try {
+                this.deepgramWs.close();
+            } catch (error) {
+                console.error('[Deepgram] Ошибка при закрытии WebSocket:', error);
+            }
+            this.deepgramWs = null;
+        }
+
+        if (this.sock) {
+            this.sock.removeAllListeners('message');
+            try {
+                this.sock.close();
+            } catch (error) {
+                console.error('[RTP] Ошибка при закрытии сокета:', error);
+            }
+        }
+
+        releaseRtpPort(this.dport);
+        this.dport = undefined;
+    }
+
+    cleanup() {
+        this.bufferQueue.removeAllListeners();
+        if (this.deepgramWs) {
+            try {
+                this.deepgramWs.close();
+            } catch (error) {
+                console.error('[Deepgram] Ошибка при закрытии WebSocket:', error);
+            }
+            this.deepgramWs = null;
+        }
+
+        if (this.sock) {
+            this.sock.removeAllListeners('message');
+            try {
+                this.sock.close();
+            } catch (error) {
+                console.error('[RTP] Ошибка при закрытии сокета:', error);
+            }
+            this.sock = null;
+        }
+
+        releaseRtpPort(this.dport);
+        this.dport = undefined;
+        this.socketReady = false;
     }
 
     cleanup() {
