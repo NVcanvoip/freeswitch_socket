@@ -158,28 +158,60 @@ class Channel {
 	    });
 	});
 
-        this.deepgramWs.on("message", async (message, isBinary) => {
-            if (isBinary || Buffer.isBuffer(message)) {
-                this.enqueueOutbound(Buffer.isBuffer(message) ? message : Buffer.from(message));
+        this.deepgramWs.on("message", async (message) => {
+            const payloadBuffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
+            const jsonPayload = this.parseDeepgramJsonPayload(payloadBuffer);
+
+            if (jsonPayload) {
+                const { response } = jsonPayload;
+                console.log("[Deepgram] Response received: ", response.is_final, response.speech_final);
+                if (response.is_final === true || response.speech_final === true) {
+                    const transcript = response.channel.alternatives?.[0]?.transcript;
+                    if (transcript) {
+                        console.log("Transcript: ", transcript);
+                    }
+                }
+                console.log("[Deepgram] Response received: ", JSON.stringify(response, null, 2));
                 return;
             }
 
-            const textMessage = message.toString();
-
-            try {
-                const response = JSON.parse(textMessage);
-                console.log("[Deepgram] Response received: ", response.is_final , response.speech_final);
-                if (response.is_final === true || response.speech_final === true) {
-                    const transcript = response.channel.alternatives[0].transcript;
-                    console.log("Transcript: ", transcript);
-                }
-                console.log("[Deepgram] Response received: ",JSON.stringify(response, null, 2));
-                console.log(response);
-//                console.log(response.channel.alternatives[0].transcript);
-            } catch (error) {
-                console.log("[Deepgram] Неподдерживаемое текстовое сообщение:", textMessage);
-            }
+            this.enqueueOutbound(payloadBuffer);
         });
+    }
+
+
+    parseDeepgramJsonPayload(buffer) {
+        if (!buffer || buffer.length === 0) {
+            return null;
+        }
+
+        let index = 0;
+        const { length } = buffer;
+        while (index < length) {
+            const byte = buffer[index];
+            if (byte === 0x20 || byte === 0x09 || byte === 0x0A || byte === 0x0D) {
+                index += 1;
+                continue;
+            }
+            break;
+        }
+
+        if (index >= length) {
+            return null;
+        }
+
+        const firstByte = buffer[index];
+        if (firstByte !== 0x7B && firstByte !== 0x5B) {
+            return null;
+        }
+
+        try {
+            const text = buffer.toString('utf8');
+            const response = JSON.parse(text);
+            return { response };
+        } catch (error) {
+            return null;
+        }
     }
 
 
@@ -316,6 +348,36 @@ class Channel {
             this.sock = null;
         }
 
+        releaseRtpPort(this.dport);
+        releaseRtpPort(this.port);
+        this.dport = undefined;
+        this.port = undefined;
+        this.socketReady = false;
+    }
+
+    cleanup() {
+        this.bufferQueue.removeAllListeners();
+        if (this.deepgramWs) {
+            try {
+                this.deepgramWs.close();
+            } catch (error) {
+                console.error('[Deepgram] Ошибка при закрытии WebSocket:', error);
+            }
+            this.deepgramWs = null;
+        }
+
+        if (this.sock) {
+            this.sock.removeAllListeners('message');
+            try {
+                this.sock.close();
+            } catch (error) {
+                console.error('[RTP] Ошибка при закрытии сокета:', error);
+            }
+            this.sock = null;
+        }
+
+        this.outboundQueue = [];
+        this.isFlushingOutbound = false;
         releaseRtpPort(this.dport);
         releaseRtpPort(this.port);
         this.dport = undefined;
