@@ -15,7 +15,30 @@ const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE; // 320 bytes per frame
 const FRAME_INTERVAL_MS = 10; // 50 packets per second
 
 
-deepgram_ws_url = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status"
+const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status";
+
+function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
+    if (!callerId && !destinationNumber) {
+        return baseUrl;
+    }
+
+    try {
+        const url = new URL(baseUrl);
+
+        if (callerId) {
+            url.searchParams.set('caller_id', callerId);
+        }
+
+        if (destinationNumber) {
+            url.searchParams.set('destination', destinationNumber);
+        }
+
+        return url.toString();
+    } catch (error) {
+        console.warn('[Deepgram] Failed to build URL with metadata:', error);
+        return baseUrl;
+    }
+}
 
 
 const server = new FreeSwitchServer()
@@ -43,7 +66,7 @@ function releaseRtpPort(port) {
 
 
 class Channel {
-    constructor() {
+    constructor({ deepgramUrl } = {}) {
         this.ssrc = Math.floor(Math.random() * 0xFFFFFFFF);
         this.seqNum = 0;
         this.timestamp = 0;
@@ -60,6 +83,7 @@ class Channel {
         this.recordingStream = null;
         this.recordingFilePath = null;
         this.recordingBytesWritten = 0;
+        this.deepgramUrl = deepgramUrl || baseDeepgramWsUrl;
 
         this.sock.on('listening', () => {
             this.socketReady = true;
@@ -172,11 +196,19 @@ class Channel {
     }
 
 
+    setDeepgramUrl(deepgramUrl) {
+        if (deepgramUrl) {
+            this.deepgramUrl = deepgramUrl;
+        }
+    }
+
+
     sendAudioSTT() {
         // Initialize Deepgram WebSocket
         console.log('Attempting to connect to Deepgram');
 
-        this.deepgramWs = new WebSocket(deepgram_ws_url);
+        const targetUrl = this.deepgramUrl || baseDeepgramWsUrl;
+        this.deepgramWs = new WebSocket(targetUrl);
 
     this.deepgramWs.on("open", () => {
             console.log('[Deepgram] Connected');
@@ -322,6 +354,8 @@ class Channel {
             this.deepgramWs = null;
         }
 
+        this.deepgramUrl = baseDeepgramWsUrl;
+
         if (this.sock) {
             this.sock.removeAllListeners('message');
             try {
@@ -459,9 +493,41 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
 
   call.on('CHANNEL_ANSWER', async function({headers,body}) {
     console.log('Call was answered');
-     const fsChannel = new Channel();
-     await fsChannel.init(call, uuid);
-     channels[uuid] = fsChannel;
+
+    let callerIdNumber;
+    let destinationNumber;
+
+    if (body) {
+      try {
+        const eventBody = JSON.parse(body);
+        const callerFromBody = eventBody['Caller-Caller-ID-Number'];
+        const destinationFromBody = eventBody['Caller-Destination-Number'];
+
+        if (callerFromBody !== undefined && callerFromBody !== null) {
+          const normalized = String(callerFromBody).trim();
+          if (normalized.length > 0) {
+            callerIdNumber = normalized;
+          }
+        }
+
+        if (destinationFromBody !== undefined && destinationFromBody !== null) {
+          const normalized = String(destinationFromBody).trim();
+          if (normalized.length > 0) {
+            destinationNumber = normalized;
+          }
+        }
+      } catch (error) {
+        console.warn('[CHANNEL_ANSWER] Failed to parse body as JSON:', error);
+      }
+    }
+
+    const deepgramUrl = buildDeepgramWsUrl(baseDeepgramWsUrl, callerIdNumber, destinationNumber);
+
+    console.log('Deepgram metadata for call %s -> caller: %s, destination: %s', uuid, callerIdNumber || 'unknown', destinationNumber || 'unknown');
+
+    const fsChannel = new Channel({ deepgramUrl });
+    await fsChannel.init(call, uuid);
+    channels[uuid] = fsChannel;
   });
 
   call.on('CHANNEL_HANGUP_COMPLETE', function() {
