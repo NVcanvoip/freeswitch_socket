@@ -41,6 +41,7 @@ function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
 }
 
 
+
 const server = new FreeSwitchServer()
 const channels = {};
 
