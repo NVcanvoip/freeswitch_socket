@@ -72,6 +72,7 @@ function getHeaderValue(headers, ...names) {
 }
 
 
+
 const server = new FreeSwitchServer()
 const channels = {};
 
@@ -540,6 +541,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
       'variable_sip_req_user',
       'variable_sip_to_user'
     );
+
     const deepgramUrl = buildDeepgramWsUrl(baseDeepgramWsUrl, callerIdNumber, destinationNumber);
 
     console.log('Deepgram metadata for call %s -> caller: %s, destination: %s', uuid, callerIdNumber || 'unknown', destinationNumber || 'unknown');
