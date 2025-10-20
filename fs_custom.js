@@ -41,7 +41,6 @@ function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
 }
 
 
-
 const server = new FreeSwitchServer()
 const channels = {};
 
@@ -499,8 +498,25 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
     let destinationNumber;
 
     if (body) {
-      try {
-        const eventBody = JSON.parse(body);
+      let eventBody;
+
+      if (typeof body === 'string') {
+        try {
+          eventBody = JSON.parse(body);
+        } catch (error) {
+          console.warn('[CHANNEL_ANSWER] Failed to parse body string as JSON:', error);
+        }
+      } else if (Buffer.isBuffer(body)) {
+        try {
+          eventBody = JSON.parse(body.toString('utf8'));
+        } catch (error) {
+          console.warn('[CHANNEL_ANSWER] Failed to parse body buffer as JSON:', error);
+        }
+      } else if (typeof body === 'object') {
+        eventBody = body;
+      }
+
+      if (eventBody && typeof eventBody === 'object') {
         const callerFromBody = eventBody['Caller-Caller-ID-Number'];
         const destinationFromBody = eventBody['Caller-Destination-Number'];
 
@@ -517,8 +533,6 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
             destinationNumber = normalized;
           }
         }
-      } catch (error) {
-        console.warn('[CHANNEL_ANSWER] Failed to parse body as JSON:', error);
       }
     }
 
