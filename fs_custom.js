@@ -12,17 +12,10 @@ const { v4: uuidv4 } = require('uuid');
 const FRAME_SIZE = 160; // 20 ms at 8 kHz
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM
 const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE; // 320 bytes per frame
-const FRAME_INTERVAL_MS = 10; //set 20 if we need 50 packets per second, but then FS lost some packet. therefoe i set 10
+const FRAME_INTERVAL_MS = 10; // 50 packets per second
 
 
-api_key = "aaa"
-//deepgram_ws_url = "wss://api.deepgram.com/v1/listen?punctuate=true&model=nova-2&language=ru&sample_rate=8000&encoding=mulaw&smart_format=true&interim_results=true&utterance_end_ms=1000&vad_events=true&endpointing=300"
-deepgram_ws_url = "wss://api.deepgram.com/v1/listen?punctuate=true&model=nova-2&language=ru&sample_rate=8000&encoding=mulaw&smart_format=true&interim_results=true&utterance_end_ms=1000&vad_events=true&endpointing=300"
-//deepgram_ws_url = "wss://tester2.mobilon.ru:8765";
-
-header = {
-    "Authorization": "Token " + api_key
-}
+deepgram_ws_url = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status"
 
 
 const server = new FreeSwitchServer()
@@ -183,19 +176,19 @@ class Channel {
         // Initialize Deepgram WebSocket
         console.log('Attempting to connect to Deepgram');
 
-        this.deepgramWs = new WebSocket(deepgram_ws_url, { headers: header });
+        this.deepgramWs = new WebSocket(deepgram_ws_url);
 
     this.deepgramWs.on("open", () => {
             console.log('[Deepgram] Connected');
 //	    deepgramWs.send(JSON.stringify({ event: 'connected' }));
-	    this.bufferQueue.on('data', (audioData) => {
-	    if (!audioData) return;
+        this.bufferQueue.on('data', (audioData) => {
+        if (!audioData) return;
 //        	const audioData2 = audioData.toString('base64');
 //            	console.log('Send AUDIO');
-	    this.deepgramWs.send(audioData);
+        this.deepgramWs.send(audioData);
 
-	    });
-	});
+        });
+    });
 
         this.deepgramWs.on("message", async (message) => {
             const payloadBuffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
@@ -300,13 +293,12 @@ class Channel {
         this.receiveAudio();
 
     try {
-	  const result = await call.unicast_uuid(uuid, {
+      const result = await call.unicast_uuid(uuid, {
             'local-ip': this.rtpAdress,
             'local-port': this.port,
             'remote-ip': this.rtpAdress,
             'remote-port': this.dport,
             transport: 'udp',
-//            flags: 'native' - set up flag if only you dont convert PCM, actualy deepgram can work with mulaw, but my
           });
           console.log('Unicast result:', result);
     } catch (error) {
@@ -314,8 +306,8 @@ class Channel {
     }
 
 //        await setTimeout(3000); // for echo test
-        this.sendAudio(this.rtpAdress, this.port); // for echo test
-//        this.sendAudioSTT(); // to DEEPGRAM!!!!
+//        this.sendAudio(this.rtpAdress, this.port); // for echo test
+        this.sendAudioSTT(); // to DEEPGRAM!!!!
     }
 
     cleanup() {
