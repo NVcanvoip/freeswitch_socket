@@ -27,12 +27,10 @@ function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
 
         if (callerId) {
             url.searchParams.set('caller_id', callerId);
-            url.searchParams.set('callerid', callerId);
         }
 
         if (destinationNumber) {
             url.searchParams.set('destination', destinationNumber);
-            url.searchParams.set('did', destinationNumber);
         }
 
         return url.toString();
@@ -41,6 +39,38 @@ function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
         return baseUrl;
     }
 }
+
+function getHeaderValue(headers, ...names) {
+    if (!headers) {
+        return undefined;
+    }
+
+    for (const name of names) {
+        if (name in headers) {
+            const value = headers[name];
+            if (value !== undefined && value !== null) {
+                const normalized = String(value).trim();
+                if (normalized.length > 0) {
+                    return normalized;
+                }
+            }
+        }
+
+        const lowerName = name.toLowerCase();
+        if (lowerName in headers) {
+            const value = headers[lowerName];
+            if (value !== undefined && value !== null) {
+                const normalized = String(value).trim();
+                if (normalized.length > 0) {
+                    return normalized;
+                }
+            }
+        }
+    }
+
+    return undefined;
+}
+
 
 
 const server = new FreeSwitchServer()
@@ -496,8 +526,22 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   call.on('CHANNEL_ANSWER', async function({headers,body}) {
     console.log('Call was answered');
 
-    const callerIdNumber = headers?.['Channel-Caller-ID-Number'] || headers?.['Caller-Caller-ID-Number'] || headers?.['variable_caller_id_number'];
-    const destinationNumber = headers?.['Channel-Destination-Number'] || headers?.['Caller-Destination-Number'] || headers?.['variable_sip_req_user'];
+    const callerIdNumber = getHeaderValue(
+      headers,
+      'Channel-Caller-ID-Number',
+      'Caller-Caller-ID-Number',
+      'Caller-ANI',
+      'variable_caller_id_number',
+      'variable_sip_from_user'
+    );
+    const destinationNumber = getHeaderValue(
+      headers,
+      'Channel-Destination-Number',
+      'Caller-Destination-Number',
+      'variable_sip_req_user',
+      'variable_sip_to_user'
+    );
+
     const deepgramUrl = buildDeepgramWsUrl(baseDeepgramWsUrl, callerIdNumber, destinationNumber);
 
     console.log('Deepgram metadata for call %s -> caller: %s, destination: %s', uuid, callerIdNumber || 'unknown', destinationNumber || 'unknown');
