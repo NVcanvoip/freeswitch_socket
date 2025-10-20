@@ -40,37 +40,6 @@ function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
     }
 }
 
-function getHeaderValue(headers, ...names) {
-    if (!headers) {
-        return undefined;
-    }
-
-    for (const name of names) {
-        if (name in headers) {
-            const value = headers[name];
-            if (value !== undefined && value !== null) {
-                const normalized = String(value).trim();
-                if (normalized.length > 0) {
-                    return normalized;
-                }
-            }
-        }
-
-        const lowerName = name.toLowerCase();
-        if (lowerName in headers) {
-            const value = headers[lowerName];
-            if (value !== undefined && value !== null) {
-                const normalized = String(value).trim();
-                if (normalized.length > 0) {
-                    return normalized;
-                }
-            }
-        }
-    }
-
-    return undefined;
-}
-
 
 
 const server = new FreeSwitchServer()
@@ -526,21 +495,32 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   call.on('CHANNEL_ANSWER', async function({headers,body}) {
     console.log('Call was answered');
 
-    const callerIdNumber = getHeaderValue(
-      headers,
-      'Channel-Caller-ID-Number',
-      'Caller-Caller-ID-Number',
-      'Caller-ANI',
-      'variable_caller_id_number',
-      'variable_sip_from_user'
-    );
-    const destinationNumber = getHeaderValue(
-      headers,
-      'Channel-Destination-Number',
-      'Caller-Destination-Number',
-      'variable_sip_req_user',
-      'variable_sip_to_user'
-    );
+    let callerIdNumber;
+    let destinationNumber;
+
+    if (body) {
+      try {
+        const eventBody = JSON.parse(body);
+        const callerFromBody = eventBody['Caller-Caller-ID-Number'];
+        const destinationFromBody = eventBody['Caller-Destination-Number'];
+
+        if (callerFromBody !== undefined && callerFromBody !== null) {
+          const normalized = String(callerFromBody).trim();
+          if (normalized.length > 0) {
+            callerIdNumber = normalized;
+          }
+        }
+
+        if (destinationFromBody !== undefined && destinationFromBody !== null) {
+          const normalized = String(destinationFromBody).trim();
+          if (normalized.length > 0) {
+            destinationNumber = normalized;
+          }
+        }
+      } catch (error) {
+        console.warn('[CHANNEL_ANSWER] Failed to parse body as JSON:', error);
+      }
+    }
 
     const deepgramUrl = buildDeepgramWsUrl(baseDeepgramWsUrl, callerIdNumber, destinationNumber);
 
