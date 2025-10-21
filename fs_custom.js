@@ -19,6 +19,16 @@ const INITIAL_BURST_FRAMES = 3; // number of frames sent immediately when buffer
 
 
 const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status";
+const USE_OUTBOUND_BUFFER = process.env.USE_OUTBOUND_BUFFER !== 'false';
+
+function getLogTimestamp() {
+    const now = new Date();
+    const iso = now.toISOString();
+    const date = iso.slice(0, 10);
+    const time = iso.slice(11, 19);
+    const hundredths = String(Math.floor(now.getMilliseconds() / 10)).padStart(2, '0');
+    return `${date} ${time}.${hundredths}`;
+}
 
 function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
     if (!callerId && !destinationNumber) {
@@ -69,7 +79,7 @@ function releaseRtpPort(port) {
 
 
 class Channel {
-    constructor({ deepgramUrl } = {}) {
+    constructor({ deepgramUrl, useOutboundBuffer } = {}) {
         this.ssrc = Math.floor(Math.random() * 0xFFFFFFFF);
         this.seqNum = 0;
         this.timestamp = 0;
@@ -87,11 +97,20 @@ class Channel {
         this.recordingStream = null;
         this.recordingFilePath = null;
         this.recordingBytesWritten = 0;
+        this.outboundRecordingStream = null;
+        this.outboundRecordingFilePath = null;
+        this.outboundRecordingBytesWritten = 0;
         this.deepgramUrl = deepgramUrl || baseDeepgramWsUrl;
+        this.useOutboundBuffer = useOutboundBuffer !== undefined ? useOutboundBuffer : true;
+        this.immediateSendPromise = Promise.resolve();
 
         this.sock.on('listening', () => {
             this.socketReady = true;
-            this.flushOutboundQueue();
+            if (this.useOutboundBuffer) {
+                this.flushOutboundQueue();
+            } else {
+                this.kickImmediateSend();
+            }
         });
 
         this.sock.on('error', (error) => {
@@ -106,6 +125,7 @@ class Channel {
             this.isSendingCachedFrames = false;
             this.pendingFrameBuffer = Buffer.alloc(0);
             this.framesSentInBurst = 0;
+            this.immediateSendPromise = Promise.resolve();
             releaseRtpPort(this.dport);
             releaseRtpPort(this.port);
             this.dport = undefined;
@@ -115,12 +135,27 @@ class Channel {
     }
 
 
-    enqueueOutbound(buffer) {
+    logWithTimestamp(message) {
+        console.log(`[${getLogTimestamp()}] ${message}`);
+    }
+
+
+    async enqueueOutbound(buffer) {
         if (!buffer || buffer.length === 0) {
             return;
         }
 
         const normalizedBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+
+        if (!this.useOutboundBuffer) {
+            this.immediateSendPromise = this.immediateSendPromise
+                .then(() => this.processImmediateOutbound(normalizedBuffer))
+                .catch((error) => {
+                    console.error(`[${getLogTimestamp()}] [RTP] Immediate outbound error:`, error);
+                });
+            return this.immediateSendPromise;
+        }
+
         this.pendingFrameBuffer = this.pendingFrameBuffer.length === 0
             ? normalizedBuffer
             : Buffer.concat([this.pendingFrameBuffer, normalizedBuffer]);
@@ -129,6 +164,7 @@ class Channel {
             const frame = this.pendingFrameBuffer.subarray(0, FRAME_BYTES);
             this.pendingFrameBuffer = this.pendingFrameBuffer.subarray(FRAME_BYTES);
             this.cachedFrames.push(frame);
+            this.recordOutboundFrame(frame);
         }
 
         this.flushOutboundQueue();
@@ -136,6 +172,10 @@ class Channel {
 
 
     flushOutboundQueue() {
+        if (!this.useOutboundBuffer) {
+            return;
+        }
+
         if (this.isSendingCachedFrames) {
             return;
         }
@@ -154,16 +194,21 @@ class Channel {
             try {
                 while (this.sock && this.socketReady && this.port !== undefined && this.rtpAdress && this.cachedFrames.length > 0) {
                     if (this.framesSentInBurst >= INITIAL_BURST_FRAMES) {
+                        this.logWithTimestamp(`[RTP] Burst threshold reached (${this.framesSentInBurst}). Pausing before next frame.`);
                         await setTimeout(FRAME_INTERVAL_MS);
                     }
 
                     const frame = this.cachedFrames.shift();
-                    await this.sendPcmFrame(frame);
+                    await this.sendPcmFrame(frame, this.cachedFrames.length);
                     this.framesSentInBurst += 1;
                 }
 
                 if (this.cachedFrames.length === 0 && this.pendingFrameBuffer.length < FRAME_BYTES) {
+                    if (this.framesSentInBurst !== 0) {
+                        this.logWithTimestamp('[RTP] Frame buffers drained. Resetting burst counter.');
+                    }
                     this.framesSentInBurst = 0;
+                    this.logWithTimestamp('[RTP] No pending frames remain in cache or buffer.');
                 }
             } catch (error) {
                 console.error('[RTP] Error sending PCM frame:', error);
@@ -180,7 +225,7 @@ class Channel {
     }
 
 
-    sendPcmFrame(frame) {
+    sendPcmFrame(frame, remainingFrames = 0) {
         return new Promise((resolve, reject) => {
             if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
                 return reject(new Error('Socket unavailable for sending PCM frame'));
@@ -188,21 +233,82 @@ class Channel {
 
             this.sock.send(frame, this.port, this.rtpAdress, (error) => {
                 if (error) {
+                    console.error(`[${getLogTimestamp()}] [RTP] Failed to send PCM frame:`, error);
                     reject(error);
-                } else {
-                    resolve();
+                    return;
                 }
+
+                this.logWithTimestamp(`[RTP] Sent PCM frame (${frame.length} bytes). Remaining cached frames: ${remainingFrames}.`);
+                resolve();
             });
         });
     }
 
 
-    receiveAudio() {
-    this.sock.on('message', (message, client) => {
-        if (message.length < 12) {
-            console.log('Error: received packet is smaller than 12 bytes!');
+    async processImmediateOutbound(buffer) {
+        if (buffer && buffer.length > 0) {
+            this.pendingFrameBuffer = this.pendingFrameBuffer.length === 0
+                ? buffer
+                : Buffer.concat([this.pendingFrameBuffer, buffer]);
+        }
+
+        if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
+            if (buffer && buffer.length > 0) {
+                this.logWithTimestamp('[RTP] Socket not ready. Stored immediate payload until socket becomes available.');
+            }
             return;
         }
+
+        let framesSent = 0;
+
+        while (this.pendingFrameBuffer.length >= FRAME_BYTES) {
+            if (this.framesSentInBurst >= INITIAL_BURST_FRAMES) {
+                this.logWithTimestamp(`[RTP] Burst threshold reached (${this.framesSentInBurst}). Pausing before next frame.`);
+                await setTimeout(FRAME_INTERVAL_MS);
+            }
+
+            const frame = this.pendingFrameBuffer.subarray(0, FRAME_BYTES);
+            this.pendingFrameBuffer = this.pendingFrameBuffer.subarray(FRAME_BYTES);
+            const remainingFrames = Math.floor(this.pendingFrameBuffer.length / FRAME_BYTES);
+            this.recordOutboundFrame(frame);
+            await this.sendPcmFrame(frame, remainingFrames);
+            this.framesSentInBurst += 1;
+            framesSent += 1;
+        }
+
+        if (framesSent > 0 && this.pendingFrameBuffer.length < FRAME_BYTES) {
+            if (this.framesSentInBurst !== 0) {
+                this.logWithTimestamp('[RTP] Frame buffers drained. Resetting burst counter.');
+            }
+            this.framesSentInBurst = 0;
+            this.logWithTimestamp('[RTP] No pending frames remain in cache or buffer.');
+        }
+    }
+
+
+    kickImmediateSend() {
+        if (this.useOutboundBuffer) {
+            return;
+        }
+
+        if (this.pendingFrameBuffer.length < FRAME_BYTES) {
+            return;
+        }
+
+        this.immediateSendPromise = this.immediateSendPromise
+            .then(() => this.processImmediateOutbound(Buffer.alloc(0)))
+            .catch((error) => {
+                console.error(`[${getLogTimestamp()}] [RTP] Immediate outbound error:`, error);
+            });
+    }
+
+
+    receiveAudio() {
+        this.sock.on('message', (message, client) => {
+            if (message.length < 12) {
+                console.log('Error: received packet is smaller than 12 bytes!');
+                return;
+            }
             this.bufferQueue.emit('data', message);
         });
     }
@@ -252,7 +358,11 @@ class Channel {
             }
 
             this.recordPayload(payloadBuffer);
-            this.enqueueOutbound(payloadBuffer);
+            try {
+                await this.enqueueOutbound(payloadBuffer);
+            } catch (error) {
+                console.error('[RTP] Failed to enqueue outbound audio:', error);
+            }
         });
     }
 
@@ -382,8 +492,10 @@ class Channel {
         this.isSendingCachedFrames = false;
         this.pendingFrameBuffer = Buffer.alloc(0);
         this.framesSentInBurst = 0;
+        this.immediateSendPromise = Promise.resolve();
 
         this.finishRecording();
+        this.finishOutboundRecording();
 
         releaseRtpPort(this.dport);
         releaseRtpPort(this.port);
@@ -456,6 +568,72 @@ class Channel {
         this.recordingStream = null;
         this.recordingFilePath = null;
         this.recordingBytesWritten = 0;
+    }
+
+
+    ensureOutboundRecordingStream() {
+        if (this.outboundRecordingStream) {
+            return;
+        }
+
+        try {
+            const recordingsDir = path.join(__dirname, 'recordings');
+            if (!fs.existsSync(recordingsDir)) {
+                fs.mkdirSync(recordingsDir, { recursive: true });
+            }
+
+            const fileName = `${this.uuid || 'channel'}_${Date.now()}_fs_outbound.wav`;
+            this.outboundRecordingFilePath = path.join(recordingsDir, fileName);
+            const header = this.createWavHeader(0);
+            this.outboundRecordingStream = fs.createWriteStream(this.outboundRecordingFilePath);
+            this.outboundRecordingStream.write(header);
+        } catch (error) {
+            console.error('[Recording] Failed to initialize outbound recording stream:', error);
+            this.outboundRecordingStream = null;
+            this.outboundRecordingFilePath = null;
+            this.outboundRecordingBytesWritten = 0;
+        }
+    }
+
+
+    recordOutboundFrame(buffer) {
+        if (!buffer || buffer.length === 0) {
+            return;
+        }
+
+        this.ensureOutboundRecordingStream();
+        if (!this.outboundRecordingStream) {
+            return;
+        }
+
+        this.outboundRecordingBytesWritten += buffer.length;
+        if (!this.outboundRecordingStream.write(buffer)) {
+            this.outboundRecordingStream.once('drain', () => {});
+        }
+    }
+
+
+    finishOutboundRecording() {
+        if (!this.outboundRecordingStream || !this.outboundRecordingFilePath) {
+            return;
+        }
+
+        const dataLength = this.outboundRecordingBytesWritten;
+        const filePath = this.outboundRecordingFilePath;
+        this.outboundRecordingStream.end(async () => {
+            try {
+                const header = this.createWavHeader(dataLength);
+                const fileHandle = await fsPromises.open(filePath, 'r+');
+                await fileHandle.write(header, 0, header.length, 0);
+                await fileHandle.close();
+            } catch (error) {
+                console.error('[Recording] Failed to finalize outbound WAV header:', error);
+            }
+        });
+
+        this.outboundRecordingStream = null;
+        this.outboundRecordingFilePath = null;
+        this.outboundRecordingBytesWritten = 0;
     }
 
 
@@ -553,7 +731,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
 
     console.log('Deepgram metadata for call %s -> caller: %s, destination: %s', uuid, callerIdNumber || 'unknown', destinationNumber || 'unknown');
 
-    const fsChannel = new Channel({ deepgramUrl });
+    const fsChannel = new Channel({ deepgramUrl, useOutboundBuffer: USE_OUTBOUND_BUFFER });
     await fsChannel.init(call, uuid);
     channels[uuid] = fsChannel;
   });
