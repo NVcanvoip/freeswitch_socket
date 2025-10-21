@@ -9,7 +9,9 @@ const { setTimeout } = require('timers/promises');
 const { v4: uuidv4 } = require('uuid');
 
 
-const FRAME_SIZE = 160; // 20 ms at 8 kHz
+const SAMPLE_RATE = 8000;
+const FRAME_DURATION_MS = 20; // 20 ms at 8 kHz
+const FRAME_SIZE = Math.round((SAMPLE_RATE * FRAME_DURATION_MS) / 1000);
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM
 const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE; // 320 bytes per frame
 const FRAME_INTERVAL_MS = 20; // target 50 packets per second
@@ -123,7 +125,25 @@ class Channel {
 
         const normalizedBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
         this.outboundQueue.push(normalizedBuffer);
-        this.flushOutboundQueue();
+
+        if (!this.hasStartedOutbound) {
+            const bufferedFrames = Math.floor(this.getTotalBufferedBytes() / FRAME_BYTES);
+            if (bufferedFrames >= STARTUP_BUFFER_FRAMES) {
+                this.hasStartedOutbound = true;
+                this.flushOutboundQueue();
+            }
+        } else {
+            this.flushOutboundQueue();
+        }
+    }
+
+
+    getTotalBufferedBytes() {
+        let total = this.pendingOutboundBuffer.length;
+        for (const chunk of this.outboundQueue) {
+            total += chunk.length;
+        }
+        return total;
     }
 
 
@@ -134,6 +154,15 @@ class Channel {
 
         if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
             return;
+        }
+
+        if (!this.hasStartedOutbound) {
+            const bufferedFrames = Math.floor(this.getTotalBufferedBytes() / FRAME_BYTES);
+            if (bufferedFrames < STARTUP_BUFFER_FRAMES) {
+                return;
+            }
+            this.hasStartedOutbound = true;
+            this.nextFrameTime = Date.now();
         }
 
         this.isFlushingOutbound = true;
@@ -182,6 +211,8 @@ class Channel {
                 if ((this.pendingOutboundBuffer.length >= FRAME_BYTES || this.outboundQueue.length > 0) &&
                     this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
                     this.flushOutboundQueue();
+                } else if (this.pendingOutboundBuffer.length < FRAME_BYTES && this.outboundQueue.length === 0) {
+                    this.nextFrameTime = null;
                 }
             }
         };
