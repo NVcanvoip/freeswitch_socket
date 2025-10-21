@@ -30,15 +30,6 @@ function getLogTimestamp() {
     return `${date} ${time}.${hundredths}`;
 }
 
-function getLogTimestamp() {
-    const now = new Date();
-    const iso = now.toISOString();
-    const date = iso.slice(0, 10);
-    const time = iso.slice(11, 19);
-    const hundredths = String(Math.floor(now.getMilliseconds() / 10)).padStart(2, '0');
-    return `${date} ${time}.${hundredths}`;
-}
-
 function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
     if (!callerId && !destinationNumber) {
         return baseUrl;
@@ -285,6 +276,20 @@ class Channel {
             framesSent += 1;
         }
 
+        if (this.pendingFrameBuffer.length > 0) {
+            if (this.framesSentInBurst >= INITIAL_BURST_FRAMES) {
+                this.logWithTimestamp(`[RTP] Burst threshold reached (${this.framesSentInBurst}). Pausing before next frame.`);
+                await setTimeout(FRAME_INTERVAL_MS);
+            }
+
+            const frame = this.pendingFrameBuffer;
+            this.pendingFrameBuffer = Buffer.alloc(0);
+            this.recordOutboundFrame(frame);
+            await this.sendPcmFrame(frame, 0);
+            this.framesSentInBurst += 1;
+            framesSent += 1;
+        }
+
         if (framesSent > 0 && this.pendingFrameBuffer.length < FRAME_BYTES) {
             if (this.framesSentInBurst !== 0) {
                 this.logWithTimestamp('[RTP] Frame buffers drained. Resetting burst counter.');
@@ -300,7 +305,7 @@ class Channel {
             return;
         }
 
-        if (this.pendingFrameBuffer.length < FRAME_BYTES) {
+        if (this.pendingFrameBuffer.length === 0) {
             return;
         }
 
