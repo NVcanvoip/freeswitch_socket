@@ -95,6 +95,7 @@ class Channel {
         this.recordingFilePath = null;
         this.recordingBytesWritten = 0;
         this.deepgramUrl = deepgramUrl || baseDeepgramWsUrl;
+        this.frameIntervalCounter = 0;
 
         this.sock.on('listening', () => {
             this.socketReady = true;
@@ -193,7 +194,16 @@ class Channel {
                 }
 
                 if (this.outboundQueue.length > 0) {
-                    await setTimeout(FRAME_INTERVAL_MS);
+                    this.frameIntervalCounter += 1;
+
+                    if (this.frameIntervalCounter >= 20) {
+                        await setTimeout(190);
+                        this.frameIntervalCounter = 0;
+                    } else {
+                        await setTimeout(FRAME_INTERVAL_MS);
+                    }
+                } else {
+                    this.frameIntervalCounter = 0;
                 }
             }
         } finally {
@@ -202,6 +212,10 @@ class Channel {
             if (this.outboundQueue.length > 0 && this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
                 this.processOutboundQueue();
             }
+        }
+
+        if (this.outboundQueue.length === 0) {
+            this.frameIntervalCounter = 0;
         }
     }
 
