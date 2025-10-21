@@ -15,8 +15,7 @@ const FRAME_SIZE = Math.round((SAMPLE_RATE * FRAME_DURATION_MS) / 1000);
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM
 const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE; // 320 bytes per frame
 const FRAME_INTERVAL_MS = 20; // target 50 packets per second
-const FRAMES_PER_SECOND = Math.floor(1000 / FRAME_INTERVAL_MS);
-const RATE_WINDOW_MS = 1000;
+const INITIAL_BURST_FRAMES = 3; // number of frames sent immediately when buffer becomes active
 
 
 const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status";
@@ -80,11 +79,10 @@ class Channel {
         this.bufferQueue.setMaxListeners(100);
         this.port = undefined;
         this.dport = undefined;
-        this.outboundQueue = [];
-        this.isFlushingOutbound = false;
-        this.pendingOutboundBuffer = Buffer.alloc(0);
-        this.framesSentThisWindow = 0;
-        this.windowStartTime = null;
+        this.cachedFrames = [];
+        this.pendingFrameBuffer = Buffer.alloc(0);
+        this.isSendingCachedFrames = false;
+        this.framesSentInBurst = 0;
         this.uuid = null;
         this.recordingStream = null;
         this.recordingFilePath = null;
@@ -104,11 +102,10 @@ class Channel {
 
         this.sock.on('close', () => {
             this.socketReady = false;
-            this.outboundQueue = [];
-            this.isFlushingOutbound = false;
-            this.pendingOutboundBuffer = Buffer.alloc(0);
-            this.framesSentThisWindow = 0;
-            this.windowStartTime = null;
+            this.cachedFrames = [];
+            this.isSendingCachedFrames = false;
+            this.pendingFrameBuffer = Buffer.alloc(0);
+            this.framesSentInBurst = 0;
             releaseRtpPort(this.dport);
             releaseRtpPort(this.port);
             this.dport = undefined;
@@ -124,31 +121,22 @@ class Channel {
         }
 
         const normalizedBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
-        this.outboundQueue.push(normalizedBuffer);
+        this.pendingFrameBuffer = this.pendingFrameBuffer.length === 0
+            ? normalizedBuffer
+            : Buffer.concat([this.pendingFrameBuffer, normalizedBuffer]);
 
-        if (!this.hasStartedOutbound) {
-            const bufferedFrames = Math.floor(this.getTotalBufferedBytes() / FRAME_BYTES);
-            if (bufferedFrames >= STARTUP_BUFFER_FRAMES) {
-                this.hasStartedOutbound = true;
-                this.flushOutboundQueue();
-            }
-        } else {
-            this.flushOutboundQueue();
+        while (this.pendingFrameBuffer.length >= FRAME_BYTES) {
+            const frame = this.pendingFrameBuffer.subarray(0, FRAME_BYTES);
+            this.pendingFrameBuffer = this.pendingFrameBuffer.subarray(FRAME_BYTES);
+            this.cachedFrames.push(frame);
         }
-    }
 
-
-    getTotalBufferedBytes() {
-        let total = this.pendingOutboundBuffer.length;
-        for (const chunk of this.outboundQueue) {
-            total += chunk.length;
-        }
-        return total;
+        this.flushOutboundQueue();
     }
 
 
     flushOutboundQueue() {
-        if (this.isFlushingOutbound) {
+        if (this.isSendingCachedFrames) {
             return;
         }
 
@@ -156,63 +144,34 @@ class Channel {
             return;
         }
 
-        if (!this.hasStartedOutbound) {
-            const bufferedFrames = Math.floor(this.getTotalBufferedBytes() / FRAME_BYTES);
-            if (bufferedFrames < STARTUP_BUFFER_FRAMES) {
-                return;
-            }
-            this.hasStartedOutbound = true;
-            this.nextFrameTime = Date.now();
+        if (this.cachedFrames.length === 0) {
+            return;
         }
 
-        this.isFlushingOutbound = true;
+        this.isSendingCachedFrames = true;
 
         const sendFrames = async () => {
             try {
-                while (this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
-                    while (this.pendingOutboundBuffer.length < FRAME_BYTES) {
-                        const nextChunk = this.outboundQueue.shift();
-                        if (!nextChunk) {
-                            return;
-                        }
-
-                        this.pendingOutboundBuffer = this.pendingOutboundBuffer.length === 0
-                            ? nextChunk
-                            : Buffer.concat([this.pendingOutboundBuffer, nextChunk]);
+                while (this.sock && this.socketReady && this.port !== undefined && this.rtpAdress && this.cachedFrames.length > 0) {
+                    if (this.framesSentInBurst >= INITIAL_BURST_FRAMES) {
+                        await setTimeout(FRAME_INTERVAL_MS);
                     }
 
-                    const frame = this.pendingOutboundBuffer.subarray(0, FRAME_BYTES);
-                    this.pendingOutboundBuffer = this.pendingOutboundBuffer.subarray(FRAME_BYTES);
-
-                    const now = Date.now();
-                    if (this.windowStartTime === null || (now - this.windowStartTime) >= RATE_WINDOW_MS) {
-                        this.windowStartTime = now;
-                        this.framesSentThisWindow = 0;
-                    }
-
+                    const frame = this.cachedFrames.shift();
                     await this.sendPcmFrame(frame);
-                    this.framesSentThisWindow += 1;
+                    this.framesSentInBurst += 1;
+                }
 
-                    if (this.framesSentThisWindow >= FRAMES_PER_SECOND) {
-                        const elapsed = Date.now() - this.windowStartTime;
-                        if (elapsed < RATE_WINDOW_MS) {
-                            await setTimeout(RATE_WINDOW_MS - elapsed);
-                        }
-
-                        this.windowStartTime = Date.now();
-                        this.framesSentThisWindow = 0;
-                    }
+                if (this.cachedFrames.length === 0 && this.pendingFrameBuffer.length < FRAME_BYTES) {
+                    this.framesSentInBurst = 0;
                 }
             } catch (error) {
                 console.error('[RTP] Error sending PCM frame:', error);
             } finally {
-                this.isFlushingOutbound = false;
+                this.isSendingCachedFrames = false;
 
-                if ((this.pendingOutboundBuffer.length >= FRAME_BYTES || this.outboundQueue.length > 0) &&
-                    this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
+                if (this.cachedFrames.length > 0 && this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
                     this.flushOutboundQueue();
-                } else if (this.pendingOutboundBuffer.length < FRAME_BYTES && this.outboundQueue.length === 0) {
-                    this.nextFrameTime = null;
                 }
             }
         };
@@ -419,11 +378,10 @@ class Channel {
             this.sock = null;
         }
 
-        this.outboundQueue = [];
-        this.isFlushingOutbound = false;
-        this.pendingOutboundBuffer = Buffer.alloc(0);
-        this.framesSentThisWindow = 0;
-        this.windowStartTime = null;
+        this.cachedFrames = [];
+        this.isSendingCachedFrames = false;
+        this.pendingFrameBuffer = Buffer.alloc(0);
+        this.framesSentInBurst = 0;
 
         this.finishRecording();
 
