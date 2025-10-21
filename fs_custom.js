@@ -30,6 +30,15 @@ function getLogTimestamp() {
     return `${date} ${time}.${hundredths}`;
 }
 
+function getLogTimestamp() {
+    const now = new Date();
+    const iso = now.toISOString();
+    const date = iso.slice(0, 10);
+    const time = iso.slice(11, 19);
+    const hundredths = String(Math.floor(now.getMilliseconds() / 10)).padStart(2, '0');
+    return `${date} ${time}.${hundredths}`;
+}
+
 function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
     if (!callerId && !destinationNumber) {
         return baseUrl;
