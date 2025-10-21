@@ -9,10 +9,12 @@ const { setTimeout } = require('timers/promises');
 const { v4: uuidv4 } = require('uuid');
 
 
-const FRAME_SIZE = 160; // 20 ms at 8 kHz
+const SAMPLE_RATE = 8000;
+const FRAME_DURATION_MS = 20; // 20 ms at 8 kHz
+const FRAME_SIZE = Math.round((SAMPLE_RATE * FRAME_DURATION_MS) / 1000);
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM
 const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE; // 320 bytes per frame
-const FRAME_INTERVAL_MS = 10; // 50 packets per second
+const STARTUP_BUFFER_FRAMES = 3; // jitter buffer before starting playback
 
 
 const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status";
@@ -79,6 +81,8 @@ class Channel {
         this.outboundQueue = [];
         this.isFlushingOutbound = false;
         this.pendingOutboundBuffer = Buffer.alloc(0);
+        this.hasStartedOutbound = false;
+        this.nextFrameTime = null;
         this.uuid = null;
         this.recordingStream = null;
         this.recordingFilePath = null;
@@ -101,6 +105,8 @@ class Channel {
             this.outboundQueue = [];
             this.isFlushingOutbound = false;
             this.pendingOutboundBuffer = Buffer.alloc(0);
+            this.hasStartedOutbound = false;
+            this.nextFrameTime = null;
             releaseRtpPort(this.dport);
             releaseRtpPort(this.port);
             this.dport = undefined;
@@ -117,7 +123,25 @@ class Channel {
 
         const normalizedBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
         this.outboundQueue.push(normalizedBuffer);
-        this.flushOutboundQueue();
+
+        if (!this.hasStartedOutbound) {
+            const bufferedFrames = Math.floor(this.getTotalBufferedBytes() / FRAME_BYTES);
+            if (bufferedFrames >= STARTUP_BUFFER_FRAMES) {
+                this.hasStartedOutbound = true;
+                this.flushOutboundQueue();
+            }
+        } else {
+            this.flushOutboundQueue();
+        }
+    }
+
+
+    getTotalBufferedBytes() {
+        let total = this.pendingOutboundBuffer.length;
+        for (const chunk of this.outboundQueue) {
+            total += chunk.length;
+        }
+        return total;
     }
 
 
@@ -128,6 +152,15 @@ class Channel {
 
         if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
             return;
+        }
+
+        if (!this.hasStartedOutbound) {
+            const bufferedFrames = Math.floor(this.getTotalBufferedBytes() / FRAME_BYTES);
+            if (bufferedFrames < STARTUP_BUFFER_FRAMES) {
+                return;
+            }
+            this.hasStartedOutbound = true;
+            this.nextFrameTime = Date.now();
         }
 
         this.isFlushingOutbound = true;
@@ -149,8 +182,17 @@ class Channel {
                     const frame = this.pendingOutboundBuffer.subarray(0, FRAME_BYTES);
                     this.pendingOutboundBuffer = this.pendingOutboundBuffer.subarray(FRAME_BYTES);
 
+                    if (this.nextFrameTime === null) {
+                        this.nextFrameTime = Date.now();
+                    }
+
+                    const now = Date.now();
+                    if (this.nextFrameTime > now) {
+                        await setTimeout(this.nextFrameTime - now);
+                    }
+
                     await this.sendPcmFrame(frame);
-                    await setTimeout(FRAME_INTERVAL_MS);
+                    this.nextFrameTime = Date.now() + FRAME_DURATION_MS;
                 }
             } catch (error) {
                 console.error('[RTP] Error sending PCM frame:', error);
@@ -160,6 +202,8 @@ class Channel {
                 if ((this.pendingOutboundBuffer.length >= FRAME_BYTES || this.outboundQueue.length > 0) &&
                     this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
                     this.flushOutboundQueue();
+                } else if (this.pendingOutboundBuffer.length < FRAME_BYTES && this.outboundQueue.length === 0) {
+                    this.nextFrameTime = null;
                 }
             }
         };
@@ -369,6 +413,8 @@ class Channel {
         this.outboundQueue = [];
         this.isFlushingOutbound = false;
         this.pendingOutboundBuffer = Buffer.alloc(0);
+        this.nextFrameTime = null;
+        this.hasStartedOutbound = false;
 
         this.finishRecording();
 
