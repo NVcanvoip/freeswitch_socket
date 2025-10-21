@@ -14,7 +14,9 @@ const FRAME_DURATION_MS = 20; // 20 ms at 8 kHz
 const FRAME_SIZE = Math.round((SAMPLE_RATE * FRAME_DURATION_MS) / 1000);
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM
 const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE; // 320 bytes per frame
-const STARTUP_BUFFER_FRAMES = 3; // jitter buffer before starting playback
+const FRAME_INTERVAL_MS = 20; // target 50 packets per second
+const FRAMES_PER_SECOND = Math.floor(1000 / FRAME_INTERVAL_MS);
+const RATE_WINDOW_MS = 1000;
 
 
 const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status";
@@ -81,8 +83,8 @@ class Channel {
         this.outboundQueue = [];
         this.isFlushingOutbound = false;
         this.pendingOutboundBuffer = Buffer.alloc(0);
-        this.hasStartedOutbound = false;
-        this.nextFrameTime = null;
+        this.framesSentThisWindow = 0;
+        this.windowStartTime = null;
         this.uuid = null;
         this.recordingStream = null;
         this.recordingFilePath = null;
@@ -105,8 +107,8 @@ class Channel {
             this.outboundQueue = [];
             this.isFlushingOutbound = false;
             this.pendingOutboundBuffer = Buffer.alloc(0);
-            this.hasStartedOutbound = false;
-            this.nextFrameTime = null;
+            this.framesSentThisWindow = 0;
+            this.windowStartTime = null;
             releaseRtpPort(this.dport);
             releaseRtpPort(this.port);
             this.dport = undefined;
@@ -182,17 +184,24 @@ class Channel {
                     const frame = this.pendingOutboundBuffer.subarray(0, FRAME_BYTES);
                     this.pendingOutboundBuffer = this.pendingOutboundBuffer.subarray(FRAME_BYTES);
 
-                    if (this.nextFrameTime === null) {
-                        this.nextFrameTime = Date.now();
-                    }
-
                     const now = Date.now();
-                    if (this.nextFrameTime > now) {
-                        await setTimeout(this.nextFrameTime - now);
+                    if (this.windowStartTime === null || (now - this.windowStartTime) >= RATE_WINDOW_MS) {
+                        this.windowStartTime = now;
+                        this.framesSentThisWindow = 0;
                     }
 
                     await this.sendPcmFrame(frame);
-                    this.nextFrameTime = Date.now() + FRAME_DURATION_MS;
+                    this.framesSentThisWindow += 1;
+
+                    if (this.framesSentThisWindow >= FRAMES_PER_SECOND) {
+                        const elapsed = Date.now() - this.windowStartTime;
+                        if (elapsed < RATE_WINDOW_MS) {
+                            await setTimeout(RATE_WINDOW_MS - elapsed);
+                        }
+
+                        this.windowStartTime = Date.now();
+                        this.framesSentThisWindow = 0;
+                    }
                 }
             } catch (error) {
                 console.error('[RTP] Error sending PCM frame:', error);
@@ -413,8 +422,8 @@ class Channel {
         this.outboundQueue = [];
         this.isFlushingOutbound = false;
         this.pendingOutboundBuffer = Buffer.alloc(0);
-        this.nextFrameTime = null;
-        this.hasStartedOutbound = false;
+        this.framesSentThisWindow = 0;
+        this.windowStartTime = null;
 
         this.finishRecording();
 
