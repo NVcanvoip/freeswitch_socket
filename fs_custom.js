@@ -20,6 +20,15 @@ const INITIAL_BURST_FRAMES = 3; // number of frames sent immediately when buffer
 
 const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status";
 
+function getLogTimestamp() {
+    const now = new Date();
+    const iso = now.toISOString();
+    const date = iso.slice(0, 10);
+    const time = iso.slice(11, 19);
+    const hundredths = String(Math.floor(now.getMilliseconds() / 10)).padStart(2, '0');
+    return `${date} ${time}.${hundredths}`;
+}
+
 function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
     if (!callerId && !destinationNumber) {
         return baseUrl;
@@ -87,6 +96,9 @@ class Channel {
         this.recordingStream = null;
         this.recordingFilePath = null;
         this.recordingBytesWritten = 0;
+        this.outboundRecordingStream = null;
+        this.outboundRecordingFilePath = null;
+        this.outboundRecordingBytesWritten = 0;
         this.deepgramUrl = deepgramUrl || baseDeepgramWsUrl;
 
         this.sock.on('listening', () => {
@@ -115,6 +127,11 @@ class Channel {
     }
 
 
+    logWithTimestamp(message) {
+        console.log(`[${getLogTimestamp()}] ${message}`);
+    }
+
+
     enqueueOutbound(buffer) {
         if (!buffer || buffer.length === 0) {
             return;
@@ -129,6 +146,7 @@ class Channel {
             const frame = this.pendingFrameBuffer.subarray(0, FRAME_BYTES);
             this.pendingFrameBuffer = this.pendingFrameBuffer.subarray(FRAME_BYTES);
             this.cachedFrames.push(frame);
+            this.recordOutboundFrame(frame);
         }
 
         this.flushOutboundQueue();
@@ -154,16 +172,21 @@ class Channel {
             try {
                 while (this.sock && this.socketReady && this.port !== undefined && this.rtpAdress && this.cachedFrames.length > 0) {
                     if (this.framesSentInBurst >= INITIAL_BURST_FRAMES) {
+                        this.logWithTimestamp(`[RTP] Burst threshold reached (${this.framesSentInBurst}). Pausing before next frame.`);
                         await setTimeout(FRAME_INTERVAL_MS);
                     }
 
                     const frame = this.cachedFrames.shift();
-                    await this.sendPcmFrame(frame);
+                    await this.sendPcmFrame(frame, this.cachedFrames.length);
                     this.framesSentInBurst += 1;
                 }
 
                 if (this.cachedFrames.length === 0 && this.pendingFrameBuffer.length < FRAME_BYTES) {
+                    if (this.framesSentInBurst !== 0) {
+                        this.logWithTimestamp('[RTP] Frame buffers drained. Resetting burst counter.');
+                    }
                     this.framesSentInBurst = 0;
+                    this.logWithTimestamp('[RTP] No pending frames remain in cache or buffer.');
                 }
             } catch (error) {
                 console.error('[RTP] Error sending PCM frame:', error);
@@ -180,7 +203,7 @@ class Channel {
     }
 
 
-    sendPcmFrame(frame) {
+    sendPcmFrame(frame, remainingFrames = 0) {
         return new Promise((resolve, reject) => {
             if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
                 return reject(new Error('Socket unavailable for sending PCM frame'));
@@ -188,21 +211,24 @@ class Channel {
 
             this.sock.send(frame, this.port, this.rtpAdress, (error) => {
                 if (error) {
+                    console.error(`[${getLogTimestamp()}] [RTP] Failed to send PCM frame:`, error);
                     reject(error);
-                } else {
-                    resolve();
+                    return;
                 }
+
+                this.logWithTimestamp(`[RTP] Sent PCM frame (${frame.length} bytes). Remaining cached frames: ${remainingFrames}.`);
+                resolve();
             });
         });
     }
 
 
     receiveAudio() {
-    this.sock.on('message', (message, client) => {
-        if (message.length < 12) {
-            console.log('Error: received packet is smaller than 12 bytes!');
-            return;
-        }
+        this.sock.on('message', (message, client) => {
+            if (message.length < 12) {
+                console.log('Error: received packet is smaller than 12 bytes!');
+                return;
+            }
             this.bufferQueue.emit('data', message);
         });
     }
@@ -384,6 +410,7 @@ class Channel {
         this.framesSentInBurst = 0;
 
         this.finishRecording();
+        this.finishOutboundRecording();
 
         releaseRtpPort(this.dport);
         releaseRtpPort(this.port);
@@ -456,6 +483,72 @@ class Channel {
         this.recordingStream = null;
         this.recordingFilePath = null;
         this.recordingBytesWritten = 0;
+    }
+
+
+    ensureOutboundRecordingStream() {
+        if (this.outboundRecordingStream) {
+            return;
+        }
+
+        try {
+            const recordingsDir = path.join(__dirname, 'recordings');
+            if (!fs.existsSync(recordingsDir)) {
+                fs.mkdirSync(recordingsDir, { recursive: true });
+            }
+
+            const fileName = `${this.uuid || 'channel'}_${Date.now()}_fs_outbound.wav`;
+            this.outboundRecordingFilePath = path.join(recordingsDir, fileName);
+            const header = this.createWavHeader(0);
+            this.outboundRecordingStream = fs.createWriteStream(this.outboundRecordingFilePath);
+            this.outboundRecordingStream.write(header);
+        } catch (error) {
+            console.error('[Recording] Failed to initialize outbound recording stream:', error);
+            this.outboundRecordingStream = null;
+            this.outboundRecordingFilePath = null;
+            this.outboundRecordingBytesWritten = 0;
+        }
+    }
+
+
+    recordOutboundFrame(buffer) {
+        if (!buffer || buffer.length === 0) {
+            return;
+        }
+
+        this.ensureOutboundRecordingStream();
+        if (!this.outboundRecordingStream) {
+            return;
+        }
+
+        this.outboundRecordingBytesWritten += buffer.length;
+        if (!this.outboundRecordingStream.write(buffer)) {
+            this.outboundRecordingStream.once('drain', () => {});
+        }
+    }
+
+
+    finishOutboundRecording() {
+        if (!this.outboundRecordingStream || !this.outboundRecordingFilePath) {
+            return;
+        }
+
+        const dataLength = this.outboundRecordingBytesWritten;
+        const filePath = this.outboundRecordingFilePath;
+        this.outboundRecordingStream.end(async () => {
+            try {
+                const header = this.createWavHeader(dataLength);
+                const fileHandle = await fsPromises.open(filePath, 'r+');
+                await fileHandle.write(header, 0, header.length, 0);
+                await fileHandle.close();
+            } catch (error) {
+                console.error('[Recording] Failed to finalize outbound WAV header:', error);
+            }
+        });
+
+        this.outboundRecordingStream = null;
+        this.outboundRecordingFilePath = null;
+        this.outboundRecordingBytesWritten = 0;
     }
 
 
