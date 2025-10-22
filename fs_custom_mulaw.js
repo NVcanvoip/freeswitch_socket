@@ -75,6 +75,7 @@ class Channel {
         this.port = undefined;
         this.dport = undefined;
         this.rtpAddress = undefined;
+        this.mulawRemainder = Buffer.alloc(0);
 
         this.sock.on('listening', () => {
             this.socketReady = true;
@@ -216,8 +217,8 @@ class Channel {
             });
         });
 
-        this.deepgramWs.on('message', (message) => {
-            this.handleWebSocketMessage(message);
+        this.deepgramWs.on('message', (message, isBinary) => {
+            this.handleWebSocketMessage(message, isBinary);
         });
 
         this.deepgramWs.on('close', () => {
@@ -229,51 +230,81 @@ class Channel {
         });
     }
 
-    handleWebSocketMessage(message) {
-        const payloadBuffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
-        this.log(`[WebSocket] Message received (${payloadBuffer.length} bytes).`);
-
-        const jsonPayload = this.parseJsonPayload(payloadBuffer);
-        if (jsonPayload) {
-            this.log('[WebSocket] JSON payload received:', jsonPayload);
+    handleWebSocketMessage(message, isBinary = false) {
+        if (!isBinary && typeof message === 'string') {
+            this.log(`[WebSocket] Message received (${message.length} chars).`);
+            const jsonPayload = this.parseJsonPayload(message);
+            if (jsonPayload) {
+                this.log('[WebSocket] JSON payload received:', jsonPayload);
+            }
             return;
         }
 
-        this.log('[WebSocket] Binary payload detected. Enqueuing for RTP send.');
-        this.enqueueOutbound(payloadBuffer);
+        const payloadBuffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
+        this.log(`[WebSocket] Message received (${payloadBuffer.length} bytes).`);
+
+        const mulawFrames = this.splitMulawFrames(payloadBuffer);
+        if (mulawFrames.length === 0) {
+            if (this.mulawRemainder.length > 0) {
+                this.log(`[WebSocket] Buffered ${this.mulawRemainder.length} bytes awaiting complete mu-law frame.`);
+            } else {
+                this.log('[WebSocket] No mu-law frames decoded from payload.');
+            }
+            return;
+        }
+
+        this.log('[WebSocket] Binary payload detected. Enqueuing mu-law frames for RTP send.');
+        for (const frame of mulawFrames) {
+            this.enqueueOutbound(frame);
+        }
     }
 
-    parseJsonPayload(buffer) {
-        if (!buffer || buffer.length === 0) {
+    parseJsonPayload(payload) {
+        if (!payload || payload.length === 0) {
             return null;
         }
 
-        let index = 0;
-        while (index < buffer.length) {
-            const byte = buffer[index];
-            if (byte === 0x20 || byte === 0x09 || byte === 0x0A || byte === 0x0D) {
-                index += 1;
-                continue;
-            }
-            break;
-        }
+        const text = typeof payload === 'string' ? payload : payload.toString('utf8');
+        const trimmed = text.trim();
 
-        if (index >= buffer.length) {
-            return null;
-        }
-
-        const firstByte = buffer[index];
-        if (firstByte !== 0x7B && firstByte !== 0x5B) {
+        if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
             return null;
         }
 
         try {
-            const text = buffer.toString('utf8');
-            return JSON.parse(text);
+            return JSON.parse(trimmed);
         } catch (error) {
-            this.log('[WebSocket] Failed to parse JSON payload:', error);
+            this.log('[WebSocket] Failed to parse JSON payload:', error.message);
             return null;
         }
+    }
+
+    splitMulawFrames(buffer) {
+        if (!buffer || buffer.length === 0) {
+            return [];
+        }
+
+        const FRAME_SIZE = 160;
+        let workingBuffer = buffer;
+
+        if (this.mulawRemainder && this.mulawRemainder.length > 0) {
+            workingBuffer = Buffer.concat([this.mulawRemainder, buffer]);
+            this.mulawRemainder = Buffer.alloc(0);
+        }
+
+        const frames = [];
+        const completeLength = workingBuffer.length - (workingBuffer.length % FRAME_SIZE);
+
+        for (let offset = 0; offset < completeLength; offset += FRAME_SIZE) {
+            frames.push(workingBuffer.slice(offset, offset + FRAME_SIZE));
+        }
+
+        const remainderLength = workingBuffer.length - completeLength;
+        if (remainderLength > 0) {
+            this.mulawRemainder = workingBuffer.slice(completeLength);
+        }
+
+        return frames;
     }
 
     async init(call, uuid) {
@@ -333,6 +364,7 @@ class Channel {
 
         this.outboundQueue = [];
         this.isProcessingQueue = false;
+        this.mulawRemainder = Buffer.alloc(0);
 
         releaseRtpPort(this.dport);
         releaseRtpPort(this.port);
