@@ -4,6 +4,8 @@ const dgram = require('dgram');
 const EventEmitter = require('events');
 const { setTimeout } = require('timers/promises');
 
+const FRAME_INTERVAL_MS = 20;
+
 const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status";
 
 function getLogTimestamp() {
@@ -70,6 +72,7 @@ class Channel {
         this.outboundQueue = [];
         this.maxQueueSize = 20000;
         this.isProcessingQueue = false;
+        this.lastSendStartTime = null;
         this.deepgramUrl = deepgramUrl || baseDeepgramWsUrl;
         this.uuid = null;
         this.port = undefined;
@@ -138,11 +141,26 @@ class Channel {
             while (this.outboundQueue.length > 0) {
                 if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAddress) {
                     this.log('[Queue] Socket not ready. Pausing outbound processing.');
+                    this.lastSendStartTime = null;
                     break;
+                }
+
+                if (this.lastSendStartTime !== null) {
+                    const now = Date.now();
+                    const desiredNextStart = this.lastSendStartTime + FRAME_INTERVAL_MS;
+                    const delayMs = desiredNextStart - now;
+
+                    if (delayMs > 0) {
+                        await setTimeout(delayMs);
+                    } else if (delayMs < -FRAME_INTERVAL_MS) {
+                        this.log(`[Pacer] Behind schedule by ${Math.abs(delayMs)} ms. Catching up without delay.`);
+                    }
                 }
 
                 const payload = this.outboundQueue.shift();
                 this.log(`[Queue] Dequeued payload (${payload.length} bytes). Remaining: ${this.outboundQueue.length}.`);
+
+                const sendStartTime = Date.now();
 
                 try {
                     await this.sendPayload(payload);
@@ -152,8 +170,10 @@ class Channel {
                     break;
                 }
 
-                if (this.outboundQueue.length > 0) {
-                    await setTimeout(20);
+                this.lastSendStartTime = sendStartTime;
+
+                if (this.outboundQueue.length === 0) {
+                    this.lastSendStartTime = null;
                 }
             }
         } finally {
@@ -364,6 +384,7 @@ class Channel {
 
         this.outboundQueue = [];
         this.isProcessingQueue = false;
+        this.lastSendStartTime = null;
         this.mulawRemainder = Buffer.alloc(0);
 
         releaseRtpPort(this.dport);
