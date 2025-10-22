@@ -14,6 +14,7 @@ const FRAME_SIZE = Math.round((SAMPLE_RATE * FRAME_DURATION_MS) / 1000);
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM
 const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE; // 320 bytes per frame
 const FRAME_INTERVAL_MS = 20; // target 50 packets per second
+const SEND_LEAD_MS = 2; // send each packet slightly before the 20 ms window ends
 
 
 const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status";
@@ -95,7 +96,7 @@ class Channel {
         this.recordingFilePath = null;
         this.recordingBytesWritten = 0;
         this.deepgramUrl = deepgramUrl || baseDeepgramWsUrl;
-        this.frameIntervalCounter = 0;
+        this.nextFrameBoundaryMs = null;
 
         this.sock.on('listening', () => {
             this.socketReady = true;
@@ -193,17 +194,24 @@ class Channel {
                     break;
                 }
 
-                if (this.outboundQueue.length > 0) {
-                    this.frameIntervalCounter += 1;
+                const sendCompletedAtMs = Number(process.hrtime.bigint() / 1000000n);
 
-                    if (this.frameIntervalCounter >= 20) {
-                        await setTimeout(190);
-                        this.frameIntervalCounter = 0;
-                    } else {
-                        await setTimeout(FRAME_INTERVAL_MS);
-                    }
+                if (this.nextFrameBoundaryMs === null) {
+                    this.nextFrameBoundaryMs = sendCompletedAtMs + FRAME_INTERVAL_MS;
                 } else {
-                    this.frameIntervalCounter = 0;
+                    const theoreticalNextBoundary = this.nextFrameBoundaryMs + FRAME_INTERVAL_MS;
+                    const minimumNextBoundary = sendCompletedAtMs + FRAME_INTERVAL_MS;
+                    this.nextFrameBoundaryMs = Math.max(theoreticalNextBoundary, minimumNextBoundary);
+                }
+
+                if (this.outboundQueue.length > 0) {
+                    const currentTimeMs = Number(process.hrtime.bigint() / 1000000n);
+                    const targetSendTimeMs = this.nextFrameBoundaryMs - SEND_LEAD_MS;
+                    const waitTimeMs = Math.max(0, targetSendTimeMs - currentTimeMs);
+
+                    if (waitTimeMs > 0) {
+                        await setTimeout(waitTimeMs);
+                    }
                 }
             }
         } finally {
@@ -215,7 +223,7 @@ class Channel {
         }
 
         if (this.outboundQueue.length === 0) {
-            this.frameIntervalCounter = 0;
+            this.nextFrameBoundaryMs = null;
         }
     }
 
