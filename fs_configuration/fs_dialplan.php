@@ -339,6 +339,18 @@ if($isItIVRcall){
                 exit();
             }
 
+            // Special handling for other websocket numbers - direct websocket streaming
+            if($destination == "18188673475" || $destination == "+18188673475") {
+                error_log("====== FS CONFIGURATION: Special websocket handling for destination [$destination]");
+                // Use domain name from domainDetails, not context (which is "default")
+//                serveWebsocketStreamingConfiguration2($domainName, $_REQUEST, $domainDetails, $customerDetails, $caller, $mysqli);
+                wsTestConfiguration2($domainName, $_REQUEST, $domainDetails, $customerDetails, $caller, $mysqli);
+                ob_end_flush();
+                ob_flush();
+                flush();
+                exit();
+            }
+
             $didNumberDetails =  getDIDNumberDetailsForCustomer($destination,$customerID,$domainID,$mysqli);
 
 

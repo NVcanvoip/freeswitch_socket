@@ -6,6 +6,7 @@ const fsPromises = fs.promises;
 const path = require('path');
 const EventEmitter = require('events');
 const { setTimeout } = require('timers/promises');
+const { v4: uuidv4 } = require('uuid');
 
 
 const SAMPLE_RATE = 8000;
@@ -14,19 +15,12 @@ const FRAME_SIZE = Math.round((SAMPLE_RATE * FRAME_DURATION_MS) / 1000);
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM
 const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE; // 320 bytes per frame
 const FRAME_INTERVAL_MS = 20; // target 50 packets per second
-const SEND_LEAD_MS = 5; // send each packet slightly before the 20 ms window ends
+const FRAMES_PER_SECOND = Math.floor(1000 / FRAME_INTERVAL_MS);
+const RATE_WINDOW_MS = 1000;
+const STARTUP_BUFFER_FRAMES = 3;
 
 
 const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status";
-
-function getLogTimestamp() {
-    const now = new Date();
-    const iso = now.toISOString();
-    const date = iso.slice(0, 10);
-    const time = iso.slice(11, 19);
-    const hundredths = String(Math.floor(now.getMilliseconds() / 10)).padStart(2, '0');
-    return `${date} ${time}.${hundredths}`;
-}
 
 function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
     if (!callerId && !destinationNumber) {
@@ -88,20 +82,19 @@ class Channel {
         this.port = undefined;
         this.dport = undefined;
         this.outboundQueue = [];
-        this.frameRemainder = Buffer.alloc(0);
-        this.isProcessingQueue = false;
-        this.maxQueueSize = 20000; // Large buffer queue size to hold significant audio backlog
+        this.isFlushingOutbound = false;
+        this.pendingOutboundBuffer = Buffer.alloc(0);
+        this.framesSentThisWindow = 0;
+        this.windowStartTime = null;
         this.uuid = null;
         this.recordingStream = null;
         this.recordingFilePath = null;
         this.recordingBytesWritten = 0;
         this.deepgramUrl = deepgramUrl || baseDeepgramWsUrl;
-        this.nextFrameBoundaryMs = null;
 
         this.sock.on('listening', () => {
             this.socketReady = true;
-            this.logWithTimestamp('[RTP] UDP socket is listening. Resuming outbound queue processing.');
-            this.processOutboundQueue();
+            this.flushOutboundQueue();
         });
 
         this.sock.on('error', (error) => {
@@ -113,8 +106,10 @@ class Channel {
         this.sock.on('close', () => {
             this.socketReady = false;
             this.outboundQueue = [];
-            this.frameRemainder = Buffer.alloc(0);
-            this.isProcessingQueue = false;
+            this.isFlushingOutbound = false;
+            this.pendingOutboundBuffer = Buffer.alloc(0);
+            this.framesSentThisWindow = 0;
+            this.windowStartTime = null;
             releaseRtpPort(this.dport);
             releaseRtpPort(this.port);
             this.dport = undefined;
@@ -124,107 +119,106 @@ class Channel {
     }
 
 
-    logWithTimestamp(message) {
-        console.log(`[${getLogTimestamp()}] ${message}`);
-    }
-
-
-    handleWebSocketPayload(payloadBuffer) {
-        if (!payloadBuffer || payloadBuffer.length === 0) {
+    enqueueOutbound(buffer) {
+        if (!buffer || buffer.length === 0) {
             return;
         }
 
-        this.logWithTimestamp(`[WebSocket] Processing audio payload (${payloadBuffer.length} bytes).`);
-        this.recordPayload(payloadBuffer);
-        this.enqueueFrames(payloadBuffer);
-    }
-
-
-    enqueueFrames(buffer) {
         const normalizedBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+        this.outboundQueue.push(normalizedBuffer);
 
-        let workingBuffer = normalizedBuffer;
-        if (this.frameRemainder.length > 0) {
-            workingBuffer = Buffer.concat([this.frameRemainder, normalizedBuffer]);
-            this.frameRemainder = Buffer.alloc(0);
-        }
-
-        while (workingBuffer.length >= FRAME_BYTES) {
-            if (this.outboundQueue.length >= this.maxQueueSize) {
-                this.logWithTimestamp(`[Queue] Maximum queue size (${this.maxQueueSize}) reached. Dropping frame.`);
-                break;
+        if (!this.hasStartedOutbound) {
+            const bufferedFrames = Math.floor(this.getTotalBufferedBytes() / FRAME_BYTES);
+            if (bufferedFrames >= STARTUP_BUFFER_FRAMES) {
+                this.hasStartedOutbound = true;
+                this.flushOutboundQueue();
             }
-
-            const frame = workingBuffer.subarray(0, FRAME_BYTES);
-            workingBuffer = workingBuffer.subarray(FRAME_BYTES);
-            this.outboundQueue.push(frame);
-            this.logWithTimestamp(`[Queue] Enqueued frame (${frame.length} bytes). Queue size: ${this.outboundQueue.length}.`);
+        } else {
+            this.flushOutboundQueue();
         }
-
-        if (workingBuffer.length > 0) {
-            this.frameRemainder = workingBuffer;
-            this.logWithTimestamp(`[Queue] Stored remainder (${this.frameRemainder.length} bytes) awaiting more data.`);
-        }
-
-        this.processOutboundQueue();
     }
 
 
-    async processOutboundQueue() {
-        if (this.isProcessingQueue) {
+    getTotalBufferedBytes() {
+        let total = this.pendingOutboundBuffer.length;
+        for (const chunk of this.outboundQueue) {
+            total += chunk.length;
+        }
+        return total;
+    }
+
+
+    flushOutboundQueue() {
+        if (this.isFlushingOutbound) {
             return;
         }
 
-        this.isProcessingQueue = true;
+        if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
+            return;
+        }
 
-        try {
-            while (this.outboundQueue.length > 0) {
-                if (!this.sock || !this.socketReady || this.port === undefined || !this.rtpAdress) {
-                    this.logWithTimestamp('[Queue] Socket not ready. Pausing outbound processing.');
-                    break;
-                }
+        if (!this.hasStartedOutbound) {
+            const bufferedFrames = Math.floor(this.getTotalBufferedBytes() / FRAME_BYTES);
+            if (bufferedFrames < STARTUP_BUFFER_FRAMES) {
+                return;
+            }
+            this.hasStartedOutbound = true;
+            this.nextFrameTime = Date.now();
+        }
 
-                const frame = this.outboundQueue.shift();
-                this.logWithTimestamp(`[Queue] Dequeued frame (${frame.length} bytes) for sending. Queue size after dequeue: ${this.outboundQueue.length}.`);
-                try {
+        this.isFlushingOutbound = true;
+
+        const sendFrames = async () => {
+            try {
+                while (this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
+                    while (this.pendingOutboundBuffer.length < FRAME_BYTES) {
+                        const nextChunk = this.outboundQueue.shift();
+                        if (!nextChunk) {
+                            return;
+                        }
+
+                        this.pendingOutboundBuffer = this.pendingOutboundBuffer.length === 0
+                            ? nextChunk
+                            : Buffer.concat([this.pendingOutboundBuffer, nextChunk]);
+                    }
+
+                    const frame = this.pendingOutboundBuffer.subarray(0, FRAME_BYTES);
+                    this.pendingOutboundBuffer = this.pendingOutboundBuffer.subarray(FRAME_BYTES);
+
+                    const now = Date.now();
+                    if (this.windowStartTime === null || (now - this.windowStartTime) >= RATE_WINDOW_MS) {
+                        this.windowStartTime = now;
+                        this.framesSentThisWindow = 0;
+                    }
+
                     await this.sendPcmFrame(frame);
-                } catch (error) {
-                    console.error(`[${getLogTimestamp()}] [RTP] Error while sending PCM frame:`, error);
-                    this.outboundQueue.unshift(frame);
-                    break;
-                }
+                    this.framesSentThisWindow += 1;
 
-                const sendCompletedAtMs = Number(process.hrtime.bigint() / 1000000n);
+                    if (this.framesSentThisWindow >= FRAMES_PER_SECOND) {
+                        const elapsed = Date.now() - this.windowStartTime;
+                        if (elapsed < RATE_WINDOW_MS) {
+                            await setTimeout(RATE_WINDOW_MS - elapsed);
+                        }
 
-                if (this.nextFrameBoundaryMs === null) {
-                    this.nextFrameBoundaryMs = sendCompletedAtMs + FRAME_INTERVAL_MS;
-                } else {
-                    const theoreticalNextBoundary = this.nextFrameBoundaryMs + FRAME_INTERVAL_MS;
-                    const minimumNextBoundary = sendCompletedAtMs + FRAME_INTERVAL_MS;
-                    this.nextFrameBoundaryMs = Math.max(theoreticalNextBoundary, minimumNextBoundary);
-                }
-
-                if (this.outboundQueue.length > 0) {
-                    const currentTimeMs = Number(process.hrtime.bigint() / 1000000n);
-                    const targetSendTimeMs = this.nextFrameBoundaryMs - SEND_LEAD_MS;
-                    const waitTimeMs = Math.max(0, targetSendTimeMs - currentTimeMs);
-
-                    if (waitTimeMs > 0) {
-                        await setTimeout(waitTimeMs);
+                        this.windowStartTime = Date.now();
+                        this.framesSentThisWindow = 0;
                     }
                 }
-            }
-        } finally {
-            this.isProcessingQueue = false;
+            } catch (error) {
+                console.error('[RTP] Error sending PCM frame:', error);
+            } finally {
+                this.isFlushingOutbound = false;
 
-            if (this.outboundQueue.length > 0 && this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
-                this.processOutboundQueue();
+                if ((this.pendingOutboundBuffer.length >= FRAME_BYTES || this.outboundQueue.length > 0) &&
+                    this.sock && this.socketReady && this.port !== undefined && this.rtpAdress) {
+                    this.flushOutboundQueue();
+                } else if (this.pendingOutboundBuffer.length < FRAME_BYTES && this.outboundQueue.length === 0) {
+                    this.nextFrameTime = null;
+                }
             }
-        }
+        };
 
-        if (this.outboundQueue.length === 0) {
-            this.nextFrameBoundaryMs = null;
-        }
+        sendFrames();
     }
 
 
@@ -236,24 +230,21 @@ class Channel {
 
             this.sock.send(frame, this.port, this.rtpAdress, (error) => {
                 if (error) {
-                    console.error(`[${getLogTimestamp()}] [RTP] Failed to send PCM frame:`, error);
                     reject(error);
-                    return;
+                } else {
+                    resolve();
                 }
-
-                this.logWithTimestamp(`[RTP] Sent PCM frame (${frame.length} bytes). Queue size after send: ${this.outboundQueue.length}.`);
-                resolve();
             });
         });
     }
 
 
     receiveAudio() {
-        this.sock.on('message', (message, client) => {
-            if (message.length < 12) {
-                console.log('Error: received packet is smaller than 12 bytes!');
-                return;
-            }
+    this.sock.on('message', (message, client) => {
+        if (message.length < 12) {
+            console.log('Error: received packet is smaller than 12 bytes!');
+            return;
+        }
             this.bufferQueue.emit('data', message);
         });
     }
@@ -287,7 +278,6 @@ class Channel {
 
         this.deepgramWs.on("message", async (message) => {
             const payloadBuffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
-            this.logWithTimestamp(`[WebSocket] Message received (${payloadBuffer.length} bytes).`);
             const jsonPayload = this.parseDeepgramJsonPayload(payloadBuffer);
 
             if (jsonPayload) {
@@ -303,7 +293,8 @@ class Channel {
                 return;
             }
 
-            this.handleWebSocketPayload(payloadBuffer);
+            this.recordPayload(payloadBuffer);
+            this.enqueueOutbound(payloadBuffer);
         });
     }
 
@@ -430,8 +421,10 @@ class Channel {
         }
 
         this.outboundQueue = [];
-        this.frameRemainder = Buffer.alloc(0);
-        this.isProcessingQueue = false;
+        this.isFlushingOutbound = false;
+        this.pendingOutboundBuffer = Buffer.alloc(0);
+        this.framesSentThisWindow = 0;
+        this.windowStartTime = null;
 
         this.finishRecording();
 

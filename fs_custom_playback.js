@@ -8,11 +8,12 @@ const { setTimeout } = require('timers/promises');
 const FRAME_SIZE = 160; // 20 ms at 8 kHz
 const BYTES_PER_SAMPLE = 2; // 16-bit PCM
 const FRAME_BYTES = FRAME_SIZE * BYTES_PER_SAMPLE; // 320 bytes per frame
-const FRAME_INTERVAL_MS = 10; // 50 packets per second
+const FRAME_INTERVAL_MS = 18; // 50 packets per second
 const WAV_HEADER_BYTES = 44;
 
 // Update this path to point to the WAV file that should be streamed to the call.
-const PLAYBACK_FILE_PATH = process.env.PLAYBACK_FILE_PATH || path.join(__dirname, 'playback_audio.wav');
+//const PLAYBACK_FILE_PATH = process.env.PLAYBACK_FILE_PATH || path.join(__dirname, '1.wav');
+const PLAYBACK_FILE_PATH = process.env.PLAYBACK_FILE_PATH || path.join(__dirname, '1aeb04ef-d725-4a86-9a29-67567157f98b_1761012589179.wav');
 
 const server = new FreeSwitchServer();
 const channels = {};

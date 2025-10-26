@@ -5448,6 +5448,7 @@ function wsTestConfiguration($domain, $request, $domainDetails, $customerDetails
     error_log("====== WS TEST CONFIGURATION: Generated test dialplan for caller [$caller] to destination [$destination_number]");
 }
 
+
 function serveWebsocketStreamingConfiguration($domain, $request, $domainDetails, $customerDetails, $caller, $mysqli) {
     // Extract essential call information
     $channel_uuid = $request["Channel-Call-UUID"];
@@ -5542,6 +5543,450 @@ function serveWebsocketStreamingConfiguration($domain, $request, $domainDetails,
     $defaultContextConfiguration->writeAttribute('application', 'set');
     $defaultContextConfiguration->writeAttribute('data', 'vtpbx_domain_id=' . $domain_id);
     $defaultContextConfiguration->endElement(); // action
+
+    // Configure audio streaming parameters for mod_audio_stream
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'STREAM_PLAYBACK=true');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'STREAM_SAMPLE_RATE=8000');
+    $defaultContextConfiguration->endElement(); // action
+
+    // Answer the call
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'answer');
+    $defaultContextConfiguration->endElement(); // action
+
+    // Log WebSocket connection start
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'log');
+    $defaultContextConfiguration->writeAttribute('data', 'INFO WebSocket streaming started - UUID: ${uuid} Caller: ' . $caller);
+    $defaultContextConfiguration->endElement(); // action
+
+    // === RINGING SOUND COMMENTED OUT FOR QUICK TESTING ===
+    // Set ringback tone
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'ringback=${us-ring}');
+    $defaultContextConfiguration->endElement(); // action
+
+    // Play two rings (4 seconds total) before connecting to WebSocket
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'playback');
+    $defaultContextConfiguration->writeAttribute('data', 'tone_stream://%(2000,4000,440,480);loops=2');
+    $defaultContextConfiguration->endElement(); // action
+
+    // Log that ringing is complete
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'log');
+    $defaultContextConfiguration->writeAttribute('data', 'INFO Ringing complete - Connecting to WebSocket');
+    $defaultContextConfiguration->endElement(); // action
+    // === END RINGING SOUND COMMENTED OUT ===
+
+    // Connect to WebSocket for audio streaming
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'api_result=${uuid_audio_stream(${uuid} start ' . $websocket_url . ' mono 8k)}');
+    $defaultContextConfiguration->endElement(); // action
+
+    // Log WebSocket connection result
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'log');
+    $defaultContextConfiguration->writeAttribute('data', 'INFO WebSocket connection result: ${api_result}');
+    $defaultContextConfiguration->endElement(); // action
+
+    // Set call status
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'DIALSTATUS=ANSWERED');
+    $defaultContextConfiguration->endElement(); // action
+
+
+    // Keep the call active for WebSocket streaming
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'park');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->endElement(); // condition
+    $defaultContextConfiguration->endElement(); // extension
+    $defaultContextConfiguration->endElement(); // context
+    $defaultContextConfiguration->endElement(); // section
+    $defaultContextConfiguration->endElement(); // document
+
+    echo $defaultContextConfiguration->outputMemory();
+
+    error_log("====== WEBSOCKET STREAMING: Generated dialplan for caller [$caller]");
+}
+
+function wsTestConfiguration2($domain, $request, $domainDetails, $customerDetails, $caller, $mysqli) {
+    // Extract essential call information
+    $channel_uuid = $request["Channel-Call-UUID"];
+    $destination_number = $request["Caller-Destination-Number"];
+    $caller_id_name = $request["Caller-Caller-ID-Name"];
+    $caller_id_number = $request["Caller-Caller-ID-Number"];
+    $customer_id = $customerDetails["id"];
+    $domain_id = $domainDetails["id"];
+    $call_direction = isset($request["Call-Direction"]) ? $request["Call-Direction"] : "inbound";
+    $network_addr = isset($request["Caller-Network-Addr"]) ? $request["Caller-Network-Addr"] : "";
+    
+    error_log("====== WS TEST CONFIGURATION: Function called with domain: " . $domain);
+    error_log("====== WS TEST CONFIGURATION: Destination: " . $destination_number);
+    error_log("====== WS TEST CONFIGURATION: Channel UUID: " . $channel_uuid);
+
+    // Recording paths - separate for caller and WebSocket audio
+    $callerRecordingPath = '/opt/ctpbx/recordings/' . $domain . '/caller-' . $channel_uuid . '.wav';
+    $wsRecordingPath = '/opt/ctpbx/recordings/' . $domain . '/ws-' . $channel_uuid . '.wav';
+    $standardRecordingPath = '/opt/ctpbx/recordings/' . $domain . '/' . $channel_uuid . '.wav';
+    
+    error_log("====== WS TEST CONFIGURATION: Caller recording path: " . $callerRecordingPath);
+    error_log("====== WS TEST CONFIGURATION: WebSocket recording path: " . $wsRecordingPath);
+    error_log("====== WS TEST CONFIGURATION: Standard recording path: " . $standardRecordingPath);
+
+    // Generate FreeSWITCH XML dialplan for test configuration
+    $defaultContextConfiguration = new XMLWriter();
+    $defaultContextConfiguration->openMemory();
+    $defaultContextConfiguration->setIndent(TRUE);
+    $defaultContextConfiguration->setIndentString('  ');
+    $defaultContextConfiguration->startDocument('1.0', 'UTF-8', 'no');
+    
+    $defaultContextConfiguration->startElement('document');
+    $defaultContextConfiguration->writeAttribute('type', 'freeswitch/xml');
+
+    $defaultContextConfiguration->startElement('section');
+    $defaultContextConfiguration->writeAttribute('name', 'dialplan');
+
+    $defaultContextConfiguration->startElement('context');
+    $defaultContextConfiguration->writeAttribute('name', 'default');
+
+    // Global extension for domain setup
+    $defaultContextConfiguration->startElement('extension');
+    $defaultContextConfiguration->writeAttribute('name', 'global');
+    $defaultContextConfiguration->writeAttribute('continue', 'true');
+
+    $defaultContextConfiguration->startElement('condition');
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'export');
+    $defaultContextConfiguration->writeAttribute('data', "domain_name=" . $domain);
+    $defaultContextConfiguration->endElement(); // action
+    $defaultContextConfiguration->endElement(); // condition
+    $defaultContextConfiguration->endElement(); // extension
+
+    // Main test configuration extension
+    $defaultContextConfiguration->startElement('extension');
+    $defaultContextConfiguration->writeAttribute('name', 'ws_test_config');
+
+    $defaultContextConfiguration->startElement('condition');
+    $defaultContextConfiguration->writeAttribute('field', 'destination_number');
+    $defaultContextConfiguration->writeAttribute('expression', '^(.*)$');
+
+    // Set CDR variables for tracking
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'vtpbx_destination_type=EXTENSION');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'vtpbx_destination_def=' . $destination_number);
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'vtpbx_customer_id=' . $customer_id);
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'vtpbx_domain_id=' . $domain_id);
+    $defaultContextConfiguration->endElement(); // action
+
+    // Log the test call
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'log');
+    $defaultContextConfiguration->writeAttribute('data', 'INFO WS Test Configuration - Auto-answering call from [' . $caller_id_number . '] UUID: ${uuid}');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set_audio_level');
+    $defaultContextConfiguration->writeAttribute('data', 'read -1');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set_audio_level');
+    $defaultContextConfiguration->writeAttribute('data', 'write 1');
+    $defaultContextConfiguration->endElement(); // action
+
+
+    // Start caller recording right after answer (using standard path for CDR compatibility)
+    // TEMPORARILY DISABLED FOR DEBUGGING
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'record_session');
+    $defaultContextConfiguration->writeAttribute('data', $standardRecordingPath);
+    $defaultContextConfiguration->endElement(); // action
+
+    // Get customer webhook details for WebSocket metadata
+    $webhookDetails_arr = get_CT_webhook_url_and_token_by_customer_and_type($customer_id, CT_API_WEBHOOK_TYPE_CDRS, $mysqli);
+    $webhook_url = $webhookDetails_arr["webhook_url"];
+    $webhook_token = $webhookDetails_arr["webhook_token"];
+    
+    // Build WebSocket URL with essential metadata
+    $metadata_params = [
+        'caller_id' => $caller_id_number,
+        'caller_name' => $caller_id_name,
+        'uuid' => $channel_uuid,
+        'destination' => $destination_number,
+        'customer_id' => $customer_id,
+        'domain_id' => $domain_id,
+        'direction' => $call_direction,
+        'network_addr' => $network_addr,
+        'timestamp' => time(),
+        'webhook_url' => $webhook_url,
+        'webhook_token' => $webhook_token,
+    ];
+    
+    // Build WebSocket URL query string
+    $query_params = [];
+    foreach ($metadata_params as $key => $value) {
+        if (!empty($value)) {
+            $query_params[] = $key . '=' . urlencode($value);
+        }
+    }
+
+    // Configure audio streaming parameters for mod_audio_stream
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'socket');
+    $defaultContextConfiguration->writeAttribute('data', '127.0.0.1:8085 async full');
+    $defaultContextConfiguration->endElement(); // action
+
+    // Auto-answer the call first
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'answer');
+    $defaultContextConfiguration->endElement(); // action
+
+    
+    // $websocket_url = "wss://9b509d674db8.ngrok-free.app/voice/fs/v1?" . implode('&', $query_params);
+    $websocket_url = "ws://54.218.134.236:8001/voice/fs/v1?" . implode('&', $query_params);
+    error_log("====== WS TEST CONFIGURATION: WebSocket URL: " . $websocket_url);
+
+    // Configure WebSocket bi-directional streaming parameters
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'STREAM_PLAYBACK=true');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'STREAM_SAMPLE_RATE=8000');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'STREAM_DIRECTION=both');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'STREAM_BUFFER_MS=40');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'STREAM_JITTERBUFFER_MS=0');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'STREAM_CODEC=PCMU');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'STREAM_TRANSPORT=wss');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'STREAM_TIMEOUT_MS=200');
+    $defaultContextConfiguration->endElement(); // action
+
+    // Start WebSocket streaming
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'ws_result=${uuid_audio_stream(${uuid} start ' . $websocket_url . ' mono 8k)}');
+    $defaultContextConfiguration->endElement(); // action
+
+    // // Record WebSocket playback separately after stream starts
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'ws_record_result=${uuid_audio_stream(${uuid} record ' . $wsRecordingPath . ')}');
+    $defaultContextConfiguration->endElement(); // action
+    
+    // Log the WebSocket recording setup
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'log');
+    $defaultContextConfiguration->writeAttribute('data', 'INFO WS Test Configuration - WebSocket recording setup: ' . $wsRecordingPath);
+    $defaultContextConfiguration->endElement(); // action
+
+    // Set call status to ANSWERED for proper CDR processing
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'DIALSTATUS=ANSWERED');
+    $defaultContextConfiguration->endElement(); // action
+
+    // Keep the call active for WebSocket interaction
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'log');
+    $defaultContextConfiguration->writeAttribute('data', 'INFO WS Test Configuration - Call active, streaming to WebSocket');
+    $defaultContextConfiguration->endElement(); // action
+
+    // Park the call to keep it active and allow WebSocket interaction
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'park');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->endElement(); // condition
+    $defaultContextConfiguration->endElement(); // extension
+    $defaultContextConfiguration->endElement(); // context
+    $defaultContextConfiguration->endElement(); // section
+    $defaultContextConfiguration->endElement(); // document
+
+    echo $defaultContextConfiguration->outputMemory();
+
+    error_log("====== WS TEST CONFIGURATION: Generated test dialplan for caller [$caller] to destination [$destination_number]");
+}
+
+
+
+
+function serveWebsocketStreamingConfiguration2($domain, $request, $domainDetails, $customerDetails, $caller, $mysqli) {
+    error_log("====== SOCKET, not websocket STREAMING: URL: " . $websocket_url);
+    // Extract essential call information
+    $channel_uuid = $request["Channel-Call-UUID"];
+    $destination_number = $request["Caller-Destination-Number"];
+    $caller_id_name = $request["Caller-Caller-ID-Name"];
+    $caller_id_number = $request["Caller-Caller-ID-Number"];
+    $customer_id = $customerDetails["id"];
+    $domain_id = $domainDetails["id"];
+    $call_direction = isset($request["Call-Direction"]) ? $request["Call-Direction"] : "inbound";
+    $network_addr = isset($request["Caller-Network-Addr"]) ? $request["Caller-Network-Addr"] : "";
+
+    // Get customer webhook details for WebSocket metadata
+    $webhookDetails_arr = get_CT_webhook_url_and_token_by_customer_and_type($customer_id, CT_API_WEBHOOK_TYPE_CDRS, $mysqli);
+    $webhook_url = $webhookDetails_arr["webhook_url"];
+    $webhook_token = $webhookDetails_arr["webhook_token"];
+    
+    // Build WebSocket URL with essential metadata
+    $metadata_params = [
+        'caller_id' => $caller_id_number,
+        'caller_name' => $caller_id_name,
+        'uuid' => $channel_uuid,
+        'destination' => $destination_number,
+        'customer_id' => $customer_id,
+        'domain_id' => $domain_id,
+        'direction' => $call_direction,
+        'network_addr' => $network_addr,
+        'timestamp' => time(),
+        'webhook_url' => $webhook_url,
+        'webhook_token' => $webhook_token,
+    ];
+    
+    // Build WebSocket URL query string
+    $query_params = [];
+    foreach ($metadata_params as $key => $value) {
+        if (!empty($value)) {
+            $query_params[] = $key . '=' . urlencode($value);
+        }
+    }
+    
+    $websocket_url = "ws://54.218.134.236:8001/voice/fs/v1?" . implode('&', $query_params);
+    error_log("====== WEBSOCKET STREAMING: URL: " . $websocket_url);
+
+    // Generate FreeSWITCH XML dialplan
+    $defaultContextConfiguration = new XMLWriter();
+    $defaultContextConfiguration->openMemory();
+    $defaultContextConfiguration->setIndent(TRUE);
+    $defaultContextConfiguration->setIndentString('  ');
+    $defaultContextConfiguration->startDocument('1.0', 'UTF-8', 'no');
+    
+    $defaultContextConfiguration->startElement('document');
+    $defaultContextConfiguration->writeAttribute('type', 'freeswitch/xml');
+
+    $defaultContextConfiguration->startElement('section');
+    $defaultContextConfiguration->writeAttribute('name', 'dialplan');
+
+    $defaultContextConfiguration->startElement('context');
+    $defaultContextConfiguration->writeAttribute('name', 'default');
+
+
+    // Global extension for domain setup
+    $defaultContextConfiguration->startElement('extension');
+    $defaultContextConfiguration->writeAttribute('name', 'global');
+    $defaultContextConfiguration->writeAttribute('continue', 'true');
+
+    $defaultContextConfiguration->startElement('condition');
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'export');
+    $defaultContextConfiguration->writeAttribute('data', "domain_name=" . $domain);
+    $defaultContextConfiguration->endElement(); // action
+    $defaultContextConfiguration->endElement(); // condition
+    $defaultContextConfiguration->endElement(); // extension
+
+    // Main WebSocket streaming extension
+    $defaultContextConfiguration->startElement('extension');
+    $defaultContextConfiguration->writeAttribute('name', 'websocket_stream');
+
+    $defaultContextConfiguration->startElement('condition');
+    $defaultContextConfiguration->writeAttribute('field', 'destination_number');
+    $defaultContextConfiguration->writeAttribute('expression', '^(.*)$');
+
+
+    // Set CDR variables for tracking
+/*    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'send_silence_when_idle=0');
+    $defaultContextConfiguration->endElement(); // action
+*/
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'rtp_jitter_buffer_plc=true');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'rtp_jitter_buffer_during_bridge=true');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'jitterbuffer_msec=60:200:20');
+    $defaultContextConfiguration->endElement(); // action
+
+
+    // Set CDR variables for tracking
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'vtpbx_destination_type=EXTENSION');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'vtpbx_customer_id=' . $customer_id);
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'vtpbx_domain_id=' . $domain_id);
+    $defaultContextConfiguration->endElement(); // action
+
+    // Configure audio streaming parameters for mod_audio_stream
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'socket');
+    $defaultContextConfiguration->writeAttribute('data', '127.0.0.1:8085 async full');
+    $defaultContextConfiguration->endElement(); // action
+
 
     // Configure audio streaming parameters for mod_audio_stream
     $defaultContextConfiguration->startElement('action');
