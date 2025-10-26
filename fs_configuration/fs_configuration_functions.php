@@ -83,7 +83,17 @@ function serveDynamicContextConfiguration($domain, $request, $domainDetails, $cu
         }break;
         case "AI":{
             // Route call to AI websocket handler
-            serveWebsocketEsl($domain,$destination_number,$domain,$customerID,$detectedDestinationDefinition,$domainID);
+            serveWebsocketEsl(
+                $domain,
+                $destination_number,
+                $domain,
+                $recordingDestinationDefinition,
+                $recordingDestinationShort,
+                $customerID,
+                $detectedDestinationDefinition,
+                $domainID,
+                $mysqli
+            );
 
 
         }break;
@@ -539,7 +549,17 @@ function serveDynamicDIDConfiguration($domainOriginal, $request, $domainDetails,
         }break;
         case "AI":{
             // Route DID call to AI websocket handler
-            serveWebsocketEsl($domainOriginal,$destination_number,$destinationDomain,$customerID,$detectedDestinationDefinition,$domainID);
+            serveWebsocketEsl(
+                $domainOriginal,
+                $destination_number,
+                $destinationDomain,
+                $recordingDestinationDefinition,
+                $recordingDestinationShort,
+                $customerID,
+                $detectedDestinationDefinition,
+                $domainID,
+                $mysqli
+            );
 
         }break;
         case "QUEUE":{
@@ -639,7 +659,17 @@ function serveDynamicDIDtoIVRconfiguration($domainOriginal, $request, $domainDet
         }break;
         case "AI":{
             // Route IVR transfer to AI websocket handler
-            serveWebsocketEsl($domainOriginal,$destination_number,$destinationDomain,$customerID,$detectedDestinationDefinition,$domainID);
+            serveWebsocketEsl(
+                $domainOriginal,
+                $destination_number,
+                $destinationDomain,
+                $recordingDestinationDefinition,
+                $recordingDestinationShort,
+                $customerID,
+                $detectedDestinationDefinition,
+                $domainID,
+                $mysqli
+            );
 
         }break;
         case "QUEUE":{
@@ -4981,11 +5011,64 @@ function serveConfigurationExternalNumber($domain,$number_dialed,$external_gatew
 
 
 
-function serveWebsocketEsl($contextDomain,$destinationNumber,$targetDomain,$customerID = "",$destinationDefinition = "",$domainID = ""){
+function serveWebsocketEsl(
+    $contextDomain,
+    $destinationNumber,
+    $targetDomain,
+    $recordingDestinationDefinition = "",
+    $recordingDestinationShort = "",
+    $customerID = "",
+    $destinationDefinition = "",
+    $domainID = "",
+    $mysqli = null
+){
 
     $expression = '^(.*)$';
     if($destinationNumber !== ''){
         $expression = '^' . preg_quote($destinationNumber, '/') . '$';
+    }
+
+    $dialedExtension = $destinationDefinition !== '' ? $destinationDefinition : $destinationNumber;
+    $effectiveDomain = $targetDomain !== '' ? $targetDomain : $contextDomain;
+
+    $vm_enable = 0;
+    $vm_timeout = defined('TIMEOUT_VM') ? TIMEOUT_VM : 20;
+    $vm_greeting_file = '';
+
+    if($mysqli && $effectiveDomain !== '' && $dialedExtension !== ''){
+        $vmDetails = getUserVMdetails($effectiveDomain,$dialedExtension,$mysqli);
+
+        if(isset($vmDetails['vm_timeout'])){
+            $vm_timeout_candidate = intval($vmDetails['vm_timeout']);
+            if($vm_timeout_candidate > 0 && $vm_timeout_candidate < 61){
+                $vm_timeout = $vm_timeout_candidate;
+            }
+        }
+
+        if(isset($vmDetails['vm_enable'])){
+            $vm_enable = intval($vmDetails['vm_enable']);
+        }
+
+        if($vm_enable === 1 && isset($vmDetails['vm_greeting'])){
+            $vm_file_id = intval($vmDetails['vm_greeting']);
+            if($vm_file_id > 0){
+                $vm_greeting_file_candidate = PBX_IVR_FILES_BASE . getIVRFileNameByID($vm_file_id,$mysqli);
+                if(!empty($vm_greeting_file_candidate)){
+                    $vm_greeting_file = $vm_greeting_file_candidate;
+                }
+            }
+        }
+    }
+
+    $moh_file = '';
+    if($mysqli && $effectiveDomain !== ''){
+        $moh_candidate = getMOHbyDomainName($effectiveDomain,$mysqli);
+        if($moh_candidate > 0){
+            $moh_file_candidate = PBX_IVR_FILES_BASE . getIVRFileNameByID($moh_candidate,$mysqli);
+            if(!empty($moh_file_candidate)){
+                $moh_file = $moh_file_candidate;
+            }
+        }
     }
 
     $defaultContextConfiguration = new XMLWriter();
@@ -5010,10 +5093,22 @@ function serveWebsocketEsl($contextDomain,$destinationNumber,$targetDomain,$cust
     $defaultContextConfiguration->writeAttribute('field', 'destination_number');
     $defaultContextConfiguration->writeAttribute('expression', $expression);
 
-    if(!empty($targetDomain)){
+    if($effectiveDomain !== ''){
         $defaultContextConfiguration->startElement('action');
         $defaultContextConfiguration->writeAttribute('application', 'export');
-        $defaultContextConfiguration->writeAttribute('data', 'domain_name=' . $targetDomain);
+        $defaultContextConfiguration->writeAttribute('data', 'domain_name=' . $effectiveDomain);
+        $defaultContextConfiguration->endElement(); // action
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'export');
+        $defaultContextConfiguration->writeAttribute('data', 'force_transfer_context=' . $effectiveDomain);
+        $defaultContextConfiguration->endElement(); // action
+    }
+
+    if($dialedExtension !== ''){
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'export');
+        $defaultContextConfiguration->writeAttribute('data', 'dialed_extension=' . $dialedExtension);
         $defaultContextConfiguration->endElement(); // action
     }
 
@@ -5022,10 +5117,10 @@ function serveWebsocketEsl($contextDomain,$destinationNumber,$targetDomain,$cust
     $defaultContextConfiguration->writeAttribute('data', 'vtpbx_destination_type=AI');
     $defaultContextConfiguration->endElement(); // action
 
-    if($destinationDefinition !== ''){
+    if($dialedExtension !== ''){
         $defaultContextConfiguration->startElement('action');
         $defaultContextConfiguration->writeAttribute('application', 'set');
-        $defaultContextConfiguration->writeAttribute('data', 'vtpbx_destination_def=' . $destinationDefinition);
+        $defaultContextConfiguration->writeAttribute('data', 'vtpbx_destination_def=' . $dialedExtension);
         $defaultContextConfiguration->endElement(); // action
     }
 
@@ -5044,6 +5139,99 @@ function serveWebsocketEsl($contextDomain,$destinationNumber,$targetDomain,$cust
     }
 
     $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'ringback=${us-ring}');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'transfer_ringback=$${hold_music}');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'ringback=ringback=${us-ring}');
+    $defaultContextConfiguration->endElement(); // action
+
+    if($moh_file !== ''){
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'set');
+        $defaultContextConfiguration->writeAttribute('data', 'hold_music=' . $moh_file);
+        $defaultContextConfiguration->endElement(); // action
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'bridge_export');
+        $defaultContextConfiguration->writeAttribute('data', 'hold_music=' . $moh_file);
+        $defaultContextConfiguration->endElement(); // action
+    }
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'call_timeout=' . $vm_timeout);
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'hangup_after_bridge=true');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'continue_on_fail=true');
+    $defaultContextConfiguration->endElement(); // action
+
+    if($dialedExtension !== ''){
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'hash');
+        $defaultContextConfiguration->writeAttribute('data', 'insert/${domain_name}-call_return/${dialed_extension}/${caller_id_number}');
+        $defaultContextConfiguration->endElement(); // action
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'hash');
+        $defaultContextConfiguration->writeAttribute('data', 'insert/${domain_name}-last_dial_ext/${dialed_extension}/${uuid}');
+        $defaultContextConfiguration->endElement(); // action
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'set');
+        $defaultContextConfiguration->writeAttribute('data', 'called_party_callgroup=${user_data(${dialed_extension}@${domain_name} var callgroup)}');
+        $defaultContextConfiguration->endElement(); // action
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'hash');
+        $defaultContextConfiguration->writeAttribute('data', 'insert/${domain_name}-last_dial_ext/${called_party_callgroup}/${uuid}');
+        $defaultContextConfiguration->endElement(); // action
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'hash');
+        $defaultContextConfiguration->writeAttribute('data', 'insert/${domain_name}-last_dial_ext/global/${uuid}');
+        $defaultContextConfiguration->endElement(); // action
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'hash');
+        $defaultContextConfiguration->writeAttribute('data', 'insert/${domain_name}-last_dial/${called_party_callgroup}/${uuid}');
+        $defaultContextConfiguration->endElement(); // action
+    }
+
+    if($recordingDestinationDefinition !== ''){
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'bind_meta_app');
+        $defaultContextConfiguration->writeAttribute('data', $recordingDestinationDefinition);
+        $defaultContextConfiguration->endElement(); // action
+    }
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'RECORD_STEREO=true');
+    $defaultContextConfiguration->endElement(); // action
+
+    if($recordingDestinationShort !== ''){
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'record_session');
+        $defaultContextConfiguration->writeAttribute('data', $recordingDestinationShort);
+        $defaultContextConfiguration->endElement(); // action
+    }
+
+    $defaultContextConfiguration->startElement('action');
     $defaultContextConfiguration->writeAttribute('application', 'set_audio_level');
     $defaultContextConfiguration->writeAttribute('data', 'read -1');
     $defaultContextConfiguration->endElement(); // action
@@ -5057,6 +5245,44 @@ function serveWebsocketEsl($contextDomain,$destinationNumber,$targetDomain,$cust
     $defaultContextConfiguration->writeAttribute('application', 'socket');
     $defaultContextConfiguration->writeAttribute('data', '127.0.0.1:8085 async full');
     $defaultContextConfiguration->endElement(); // action
+
+    if($vm_enable === 1 && $dialedExtension !== ''){
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'answer');
+        $defaultContextConfiguration->endElement(); // action
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'sleep');
+        $defaultContextConfiguration->writeAttribute('data', '1000');
+        $defaultContextConfiguration->endElement(); // action
+
+        if($vm_greeting_file !== ''){
+            $defaultContextConfiguration->startElement('action');
+            $defaultContextConfiguration->writeAttribute('application', 'export');
+            $defaultContextConfiguration->writeAttribute('data', 'skip_greeting=true');
+            $defaultContextConfiguration->endElement(); // action
+
+            $defaultContextConfiguration->startElement('action');
+            $defaultContextConfiguration->writeAttribute('application', 'playback');
+            $defaultContextConfiguration->writeAttribute('data', $vm_greeting_file);
+            $defaultContextConfiguration->endElement(); // action
+        }
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'set');
+        $defaultContextConfiguration->writeAttribute('data', 'ignore_early_media=false');
+        $defaultContextConfiguration->endElement(); // action
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'export');
+        $defaultContextConfiguration->writeAttribute('data', 'vtpbx_base_call_uuid=${uuid}');
+        $defaultContextConfiguration->endElement(); // action
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'bridge');
+        $defaultContextConfiguration->writeAttribute('data', 'loopback/app=voicemail:default ${domain_name} ${dialed_extension}');
+        $defaultContextConfiguration->endElement(); // action
+    }
 
     $defaultContextConfiguration->endElement(); // condition
     $defaultContextConfiguration->endElement(); // extension
