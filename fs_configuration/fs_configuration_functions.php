@@ -5180,6 +5180,16 @@ function serveWebsocketEsl(
     $defaultContextConfiguration->writeAttribute('data', 'continue_on_fail=true');
     $defaultContextConfiguration->endElement(); // action
 
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'DIALSTATUS=ANSWERED');
+    $defaultContextConfiguration->endElement(); // action
+
+    $defaultContextConfiguration->startElement('action');
+    $defaultContextConfiguration->writeAttribute('application', 'set');
+    $defaultContextConfiguration->writeAttribute('data', 'endpoint_disposition=ANSWER');
+    $defaultContextConfiguration->endElement(); // action
+
     if($dialedExtension !== ''){
         $defaultContextConfiguration->startElement('action');
         $defaultContextConfiguration->writeAttribute('application', 'hash');
