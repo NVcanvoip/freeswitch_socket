@@ -17,7 +17,7 @@ const FRAME_INTERVAL_MS = 20; // target 50 packets per second
 const SEND_LEAD_MS = 5; // send each packet slightly before the 20 ms window ends
 
 
-const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1?caller_id=18186971437&destination=18188673475&webhook_url=https%3A%2F%2Fcallerwho.com%2Fclient_api%2Fcall_status";
+const baseDeepgramWsUrl = "ws://54.218.134.236:8001/voice/fs/v1";
 
 function getLogTimestamp() {
     const now = new Date();
@@ -28,21 +28,25 @@ function getLogTimestamp() {
     return `${date} ${time}.${hundredths}`;
 }
 
-function buildDeepgramWsUrl(baseUrl, callerId, destinationNumber) {
-    if (!callerId && !destinationNumber) {
+function buildDeepgramWsUrl(baseUrl, metadata = {}) {
+    if (!metadata || typeof metadata !== 'object' || Object.keys(metadata).length === 0) {
         return baseUrl;
     }
 
     try {
         const url = new URL(baseUrl);
+        Object.entries(metadata).forEach(([key, value]) => {
+            if (value === undefined || value === null) {
+                return;
+            }
 
-        if (callerId) {
-            url.searchParams.set('caller_id', callerId);
-        }
+            const normalizedValue = String(value).trim();
+            if (normalizedValue.length === 0) {
+                return;
+            }
 
-        if (destinationNumber) {
-            url.searchParams.set('destination', destinationNumber);
-        }
+            url.searchParams.set(key, normalizedValue);
+        });
 
         return url.toString();
     } catch (error) {
@@ -557,13 +561,12 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   call.on('CHANNEL_ANSWER', async function({headers,body}) {
     console.log('Call was answered');
 
-    let callerIdNumber;
-    let destinationNumber;
+    const metadata = {};
 
     if (body) {
-      let eventBody;
+        let eventBody;
 
-      if (typeof body === 'string') {
+        if (typeof body === 'string') {
         try {
           eventBody = JSON.parse(body);
         } catch (error) {
@@ -580,28 +583,49 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
       }
 
       if (eventBody && typeof eventBody === 'object') {
-        const callerFromBody = eventBody['Caller-Caller-ID-Number'];
-        const destinationFromBody = eventBody['Caller-Destination-Number'];
-
-        if (callerFromBody !== undefined && callerFromBody !== null) {
-          const normalized = String(callerFromBody).trim();
-          if (normalized.length > 0) {
-            callerIdNumber = normalized;
+        const assignIfPresent = (targetKey, ...candidateKeys) => {
+          for (const key of candidateKeys) {
+            if (Object.prototype.hasOwnProperty.call(eventBody, key)) {
+              const raw = eventBody[key];
+              if (raw !== undefined && raw !== null) {
+                const normalized = String(raw).trim();
+                if (normalized.length > 0) {
+                  metadata[targetKey] = normalized;
+                  return;
+                }
+              }
+            }
           }
-        }
+        };
 
-        if (destinationFromBody !== undefined && destinationFromBody !== null) {
-          const normalized = String(destinationFromBody).trim();
-          if (normalized.length > 0) {
-            destinationNumber = normalized;
+        assignIfPresent('caller_id', 'Caller-Caller-ID-Number', 'Caller-ANI');
+        assignIfPresent('caller_name', 'Caller-Caller-ID-Name', 'Caller-Orig-Caller-ID-Name');
+        assignIfPresent('uuid', 'Channel-Call-UUID', 'Unique-ID', 'variable_uuid');
+        assignIfPresent('destination', 'Caller-Destination-Number', 'variable_sip_to_user');
+        assignIfPresent('customer_id', 'variable_vtpbx_customer_id');
+        assignIfPresent('domain_id', 'variable_vtpbx_domain_id');
+        assignIfPresent('direction', 'Call-Direction', 'Caller-Direction', 'variable_direction');
+        assignIfPresent('network_addr', 'Caller-Network-Addr', 'variable_sip_network_ip');
+        assignIfPresent('webhook_url', 'variable_webhook_url');
+        assignIfPresent('webhook_token', 'variable_webhook_token');
+
+        const eventTimestamp = eventBody['Event-Date-Timestamp'];
+        if (eventTimestamp !== undefined && eventTimestamp !== null) {
+          const numericTimestamp = Number(eventTimestamp);
+          if (!Number.isNaN(numericTimestamp) && Number.isFinite(numericTimestamp)) {
+            metadata.timestamp = Math.floor(numericTimestamp / 1000000);
           }
         }
       }
     }
 
-    const deepgramUrl = buildDeepgramWsUrl(baseDeepgramWsUrl, callerIdNumber, destinationNumber);
+    if (!metadata.timestamp) {
+      metadata.timestamp = Math.floor(Date.now() / 1000);
+    }
 
-    console.log('Deepgram metadata for call %s -> caller: %s, destination: %s', uuid, callerIdNumber || 'unknown', destinationNumber || 'unknown');
+    const deepgramUrl = buildDeepgramWsUrl(baseDeepgramWsUrl, metadata);
+
+    console.log('Deepgram metadata for call %s -> %o', uuid, metadata);
 
     const fsChannel = new Channel({ deepgramUrl });
     await fsChannel.init(call, uuid);
