@@ -314,43 +314,6 @@ if($isItIVRcall){
             error_log("====== FS CONFIGURATION: Destination: " . $destination);
             error_log("====== FS CONFIGURATION: Domain name: " . $domainName);
 
-            // Special handling for 18188673471 - test configuration with auto-answer and two-leg connection
-            if($destination == "18188673471" || $destination == "+18188673471") {
-                error_log("====== FS CONFIGURATION: Special test configuration for destination [$destination]");
-                error_log("====== FS CONFIGURATION: Domain name: " . $domainName);
-                error_log("====== FS CONFIGURATION: Domain details: " . print_r($domainDetails, true));
-                // Use domain name from domainDetails, not context (which is "default")
-                wsTestConfiguration($domainName, $_REQUEST, $domainDetails, $customerDetails, $caller, $mysqli);
-                ob_end_flush();
-                ob_flush();
-                flush();
-                exit();
-            }
-            
-            // Special handling for other websocket numbers - direct websocket streaming
-            if($destination == "13102997466" || $destination == "+13102997466"
-             || $destination == "18182758428" || $destination == "+18182758428") {
-                error_log("====== FS CONFIGURATION: Special websocket handling for destination [$destination]");
-                // Use domain name from domainDetails, not context (which is "default")
-                serveWebsocketStreamingConfiguration($domainName, $_REQUEST, $domainDetails, $customerDetails, $caller, $mysqli);
-                ob_end_flush();
-                ob_flush();
-                flush();
-                exit();
-            }
-
-            // Special handling for other websocket numbers - direct websocket streaming
-            if($destination == "18188673475" || $destination == "+18188673475") {
-                error_log("====== FS CONFIGURATION: Special websocket handling for destination [$destination]");
-                // Use domain name from domainDetails, not context (which is "default")
-//                serveWebsocketStreamingConfiguration2($domainName, $_REQUEST, $domainDetails, $customerDetails, $caller, $mysqli);
-                wsTestConfiguration2($domainName, $_REQUEST, $domainDetails, $customerDetails, $caller, $mysqli);
-                ob_end_flush();
-                ob_flush();
-                flush();
-                exit();
-            }
-
             $didNumberDetails =  getDIDNumberDetailsForCustomer($destination,$customerID,$domainID,$mysqli);
 
 
