@@ -81,7 +81,7 @@ function serveDynamicContextConfiguration($domain, $request, $domainDetails, $cu
 
 
         }break;
-        case "AI":{
+        case "VOICE_AI_AGENT":{
             // Route call to AI websocket handler
             serveWebsocketEsl(
                 $domain,
@@ -547,7 +547,7 @@ function serveDynamicDIDConfiguration($domainOriginal, $request, $domainDetails,
             serveConfigurationLocalExtensionViaDID($domainOriginal,$destination_number,$recordingDestinationDefinition,$recordingDestinationShort,$destinationDomain,$detectedDestinationDefinition,$customerID,$mysqli);
 
         }break;
-        case "AI":{
+        case "VOICE_AI_AGENT":{
             // Route DID call to AI websocket handler
             serveWebsocketEsl(
                 $domainOriginal,
@@ -657,7 +657,7 @@ function serveDynamicDIDtoIVRconfiguration($domainOriginal, $request, $domainDet
             serveConfigurationLocalExtensionViaDID($domainOriginal,$destination_number,$recordingDestinationDefinition,$recordingDestinationShort,$destinationDomain,$detectedDestinationDefinition,$customerID,$mysqli);
 
         }break;
-        case "AI":{
+        case "VOICE_AI_AGENT":{
             // Route IVR transfer to AI websocket handler
             serveWebsocketEsl(
                 $domainOriginal,
@@ -822,7 +822,7 @@ function detectDestinationType($destinationNumber,$extensionLength,$customerDeta
                     $destinationType["id"] = $extensionNumberDetails["id"];
 
                 }break;
-                case "AI":{
+                case "VOICE_AI_AGENT":{
                     // AI websocket destination
                     $destinationType["type"] = $extensionNumberActionType;
                     $destinationType["def"] = $extensionNumberDetails["action_def"];
@@ -5114,7 +5114,7 @@ function serveWebsocketEsl(
 
     $defaultContextConfiguration->startElement('action');
     $defaultContextConfiguration->writeAttribute('application', 'set');
-    $defaultContextConfiguration->writeAttribute('data', 'vtpbx_destination_type=AI');
+    $defaultContextConfiguration->writeAttribute('data', 'vtpbx_destination_type=VOICE_AI_AGENT');
     $defaultContextConfiguration->endElement(); // action
 
     if($dialedExtension !== ''){
