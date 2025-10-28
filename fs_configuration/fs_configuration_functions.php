@@ -5035,6 +5035,27 @@ function serveWebsocketEsl(
     $vm_timeout = defined('TIMEOUT_VM') ? TIMEOUT_VM : 20;
     $vm_greeting_file = '';
 
+    $webhook_url = '';
+    $webhook_token = '';
+
+    if($mysqli && $customerID !== ''){
+        $webhookDetails_arr = get_CT_webhook_url_and_token_by_customer_and_type($customerID, CT_API_WEBHOOK_TYPE_CDRS, $mysqli);
+        if(is_array($webhookDetails_arr)){
+            if(isset($webhookDetails_arr['webhook_url'])){
+                $webhook_url_candidate = trim($webhookDetails_arr['webhook_url']);
+                if($webhook_url_candidate !== ''){
+                    $webhook_url = $webhook_url_candidate;
+                }
+            }
+            if(isset($webhookDetails_arr['webhook_token'])){
+                $webhook_token_candidate = trim($webhookDetails_arr['webhook_token']);
+                if($webhook_token_candidate !== ''){
+                    $webhook_token = $webhook_token_candidate;
+                }
+            }
+        }
+    }
+
     if($mysqli && $effectiveDomain !== '' && $dialedExtension !== ''){
         $vmDetails = getUserVMdetails($effectiveDomain,$dialedExtension,$mysqli);
 
@@ -5135,6 +5156,20 @@ function serveWebsocketEsl(
         $defaultContextConfiguration->startElement('action');
         $defaultContextConfiguration->writeAttribute('application', 'set');
         $defaultContextConfiguration->writeAttribute('data', 'vtpbx_domain_id=' . $domainID);
+        $defaultContextConfiguration->endElement(); // action
+    }
+
+    if($webhook_url !== ''){
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'set');
+        $defaultContextConfiguration->writeAttribute('data', 'webhook_url=' . $webhook_url);
+        $defaultContextConfiguration->endElement(); // action
+    }
+
+    if($webhook_token !== ''){
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'set');
+        $defaultContextConfiguration->writeAttribute('data', 'webhook_token=' . $webhook_token);
         $defaultContextConfiguration->endElement(); // action
     }
 
