@@ -498,6 +498,17 @@ class Channel {
             return;
         }
 
+        if (this.deepgramWs.readyState !== WebSocket.OPEN) {
+            const error = new Error('Deepgram WebSocket not open for ready acknowledgment');
+            console.error('[Deepgram] Cannot send ready acknowledgment:', error);
+            if (this.readyReject) {
+                this.readyReject(error);
+                this.readyReject = null;
+                this.readyResolve = null;
+            }
+            return;
+        }
+
         const commandTimestamp = payload.timestamp;
         const acknowledgmentPayload = {
             type: 'acknowledgment',
@@ -508,20 +519,27 @@ class Channel {
             message: 'custom message',
         };
 
-        try {
-            this.deepgramWs.send(JSON.stringify(acknowledgmentPayload));
-            console.log('[Deepgram] Sent ready acknowledgment');
-        } catch (error) {
-            console.error('[Deepgram] Failed to send acknowledgment:', error);
-        }
-
-        this.hasAcknowledgedReady = true;
         this.createReadyPromise();
-        if (this.readyResolve) {
-            this.readyResolve(payload);
-            this.readyResolve = null;
-            this.readyReject = null;
-        }
+
+        this.deepgramWs.send(JSON.stringify(acknowledgmentPayload), (error) => {
+            if (error) {
+                console.error('[Deepgram] Failed to send ready acknowledgment:', error);
+                if (this.readyReject) {
+                    this.readyReject(error);
+                    this.readyReject = null;
+                    this.readyResolve = null;
+                }
+                return;
+            }
+
+            console.log('[Deepgram] Sent ready acknowledgment');
+            this.hasAcknowledgedReady = true;
+            if (this.readyResolve) {
+                this.readyResolve(payload);
+                this.readyResolve = null;
+                this.readyReject = null;
+            }
+        });
     }
 
     parseDeepgramJsonPayload(buffer) {
