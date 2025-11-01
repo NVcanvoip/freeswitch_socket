@@ -524,6 +524,11 @@ class Channel {
         if (jsonPayload) {
             this.logJsonPayload('in', jsonPayload);
 
+            if (jsonPayload.type === 'ready_to_greet') {
+                this.handleReadyToGreet(jsonPayload);
+                return;
+            }
+
             if (jsonPayload.type === 'clear') {
                 this.handleClearCommand(jsonPayload);
                 return;
