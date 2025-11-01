@@ -247,6 +247,15 @@ class Channel {
     }
 
 
+    setCall(call) {
+        if (!call) {
+            return;
+        }
+
+        this.call = call;
+    }
+
+
     logWithTimestamp(message, { level = 'log', category = 'debug' } = {}) {
         if (category === 'rtp' && !ENABLE_RTP_LOGGING && level === 'log') {
             return;
@@ -1090,8 +1099,10 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
     if (!fsChannel) {
       fsChannel = new Channel({ deepgramUrl: targetUrl });
       channels[uuid] = fsChannel;
+      fsChannel.setCall(call);
     } else {
       fsChannel.setDeepgramUrl(targetUrl);
+      fsChannel.setCall(call);
     }
 
     try {
@@ -1124,6 +1135,9 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
       const targetUrl = buildDeepgramWsUrl(baseDeepgramWsUrl, metadata);
       fsChannel = new Channel({ deepgramUrl: targetUrl });
       channels[uuid] = fsChannel;
+      fsChannel.setCall(call);
+    } else {
+      fsChannel.setCall(call);
     }
 
     try {
