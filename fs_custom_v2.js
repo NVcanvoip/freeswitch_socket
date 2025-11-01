@@ -19,6 +19,10 @@ const SEND_LEAD_MS = 5; // send each packet slightly before the 20 ms window end
 
 const baseDeepgramWsUrl = "ws://127.0.0.1:8765/voice/fs/v1";
 
+const ENABLE_PACKET_RECORDING = false;
+const ENABLE_RTP_LOGGING = false;
+const ENABLE_DEBUG_LOGGING = true;
+
 function getLogTimestamp() {
     const now = new Date();
     const iso = now.toISOString();
@@ -211,10 +215,15 @@ class Channel {
         this.readyReject = null;
         this.hasAcknowledgedReady = false;
         this.bufferForwarder = null;
+        this.call = null;
+        this.recordingEnabled = ENABLE_PACKET_RECORDING;
+        this.hasSentHangupEvent = false;
+        this.hasSentAnsweredEvent = false;
+        this.finalizePromise = null;
 
         this.sock.on('listening', () => {
             this.socketReady = true;
-            this.logWithTimestamp('[RTP] UDP socket is listening. Resuming outbound queue processing.');
+            this.logWithTimestamp('[RTP] UDP socket is listening. Resuming outbound queue processing.', { category: 'rtp' });
             this.processOutboundQueue();
         });
 
@@ -238,8 +247,42 @@ class Channel {
     }
 
 
-    logWithTimestamp(message) {
-        console.log(`[${getLogTimestamp()}] ${message}`);
+    logWithTimestamp(message, { level = 'log', category = 'debug' } = {}) {
+        if (category === 'rtp' && !ENABLE_RTP_LOGGING && level === 'log') {
+            return;
+        }
+
+        if (category === 'debug' && !ENABLE_DEBUG_LOGGING && level === 'log') {
+            return;
+        }
+
+        const formatted = `[${getLogTimestamp()}] ${message}`;
+
+        if (level === 'error') {
+            console.error(formatted);
+            return;
+        }
+
+        if (level === 'warn') {
+            console.warn(formatted);
+            return;
+        }
+
+        console.log(formatted);
+    }
+
+
+    logJsonPayload(direction, payload) {
+        if (!ENABLE_DEBUG_LOGGING) {
+            return;
+        }
+
+        try {
+            const serialized = JSON.stringify(payload);
+            this.logWithTimestamp(`[WebSocket][${direction}] ${serialized}`);
+        } catch (error) {
+            this.logWithTimestamp(`[WebSocket][${direction}] Failed to serialize JSON payload: ${error.message}`, { level: 'warn' });
+        }
     }
 
 
@@ -355,7 +398,7 @@ class Channel {
                     return;
                 }
 
-                this.logWithTimestamp(`[RTP] Sent PCM frame (${frame.length} bytes). Queue size after send: ${this.outboundQueue.length}.`);
+                this.logWithTimestamp(`[RTP] Sent PCM frame (${frame.length} bytes). Queue size after send: ${this.outboundQueue.length}.`, { category: 'rtp' });
                 resolve();
             });
         });
@@ -405,14 +448,14 @@ class Channel {
             return this.waitForReady();
         }
 
-        console.log('Attempting to connect to Deepgram');
+        this.logWithTimestamp('[WebSocket] Attempting to connect to Deepgram.');
 
         const targetUrl = this.deepgramUrl || baseDeepgramWsUrl;
         this.createReadyPromise();
         this.deepgramWs = new WebSocket(targetUrl);
 
         this.deepgramWs.on('open', () => {
-            console.log('[Deepgram] Connected');
+            this.logWithTimestamp('[WebSocket] Connected to Deepgram.');
         });
 
         this.deepgramWs.on('message', (message) => {
@@ -429,7 +472,7 @@ class Channel {
         });
 
         this.deepgramWs.on('close', () => {
-            console.log('[Deepgram] WebSocket closed');
+            this.logWithTimestamp('[WebSocket] Deepgram WebSocket closed.');
             if (!this.hasAcknowledgedReady && this.readyReject) {
                 this.readyReject(new Error('Deepgram WebSocket closed before ready event'));
                 this.readyReject = null;
@@ -470,6 +513,18 @@ class Channel {
         const jsonPayload = this.parseDeepgramJsonPayload(payloadBuffer);
 
         if (jsonPayload) {
+            this.logJsonPayload('in', jsonPayload);
+
+            if (jsonPayload.type === 'clear') {
+                this.handleClearCommand(jsonPayload);
+                return;
+            }
+
+            if (jsonPayload.type === 'end_call') {
+                this.handleEndCallCommand(jsonPayload);
+                return;
+            }
+
             const { response } = jsonPayload;
             if (response && typeof response === 'object') {
                 if (response.type === 'ready_to_greet') {
@@ -480,13 +535,21 @@ class Channel {
                 if (response.is_final === true || response.speech_final === true) {
                     const transcript = response.channel?.alternatives?.[0]?.transcript;
                     if (transcript) {
-                        console.log('Transcript: ', transcript);
+                        this.logWithTimestamp(`Transcript: ${transcript}`);
                     }
                 }
 
-                console.log('[Deepgram] Response received: ', JSON.stringify(response, null, 2));
+                let serializedResponse = '';
+                try {
+                    serializedResponse = JSON.stringify(response);
+                } catch (error) {
+                    serializedResponse = '[unserializable response]';
+                }
+                this.logWithTimestamp(`[Deepgram] Response received: ${serializedResponse}`);
                 return;
             }
+
+            return;
         }
 
         this.handleWebSocketPayload(payloadBuffer);
@@ -521,25 +584,24 @@ class Channel {
 
         this.createReadyPromise();
 
-        this.deepgramWs.send(JSON.stringify(acknowledgmentPayload), (error) => {
-            if (error) {
+        this.sendJsonMessage(acknowledgmentPayload)
+            .then(() => {
+                this.logWithTimestamp('[Deepgram] Sent ready acknowledgment.');
+                this.hasAcknowledgedReady = true;
+                if (this.readyResolve) {
+                    this.readyResolve(payload);
+                    this.readyResolve = null;
+                    this.readyReject = null;
+                }
+            })
+            .catch((error) => {
                 console.error('[Deepgram] Failed to send ready acknowledgment:', error);
                 if (this.readyReject) {
                     this.readyReject(error);
                     this.readyReject = null;
                     this.readyResolve = null;
                 }
-                return;
-            }
-
-            console.log('[Deepgram] Sent ready acknowledgment');
-            this.hasAcknowledgedReady = true;
-            if (this.readyResolve) {
-                this.readyResolve(payload);
-                this.readyResolve = null;
-                this.readyReject = null;
-            }
-        });
+            });
     }
 
     parseDeepgramJsonPayload(buffer) {
@@ -569,78 +631,179 @@ class Channel {
 
         try {
             const text = buffer.toString('utf8');
-            const response = JSON.parse(text);
-            return { response };
+            return JSON.parse(text);
         } catch (error) {
             return null;
         }
     }
 
 
-    sendAudio(address, port) {
-        this.bufferQueue.on('data', (audioData) => {
-            if (!audioData) {
-                return;
-            }
+    async sendJsonMessage(payload) {
+        if (!this.deepgramWs || this.deepgramWs.readyState !== WebSocket.OPEN) {
+            const error = new Error('Deepgram WebSocket not open');
+            this.logWithTimestamp(`[WebSocket] Unable to send JSON payload: ${error.message}`, { level: 'warn' });
+            throw error;
+        }
 
-            const rtpPacket = audioData;
-            setTimeout(1000).then(() => {
-                if (!this.sock || !this.socketReady) {
-                    console.warn('[RTP] Attempted to send a packet on an inactive socket. Packet dropped.');
+        let serialized;
+        try {
+            serialized = JSON.stringify(payload);
+        } catch (error) {
+            this.logWithTimestamp(`[WebSocket] Failed to serialize JSON payload: ${error.message}`, { level: 'warn' });
+            throw error;
+        }
+
+        this.logJsonPayload('out', payload);
+
+        await new Promise((resolve, reject) => {
+            this.deepgramWs.send(serialized, (error) => {
+                if (error) {
+                    this.logWithTimestamp(`[WebSocket] Failed to send JSON payload: ${error.message}`, { level: 'warn' });
+                    reject(error);
                     return;
                 }
 
-                try {
-                    this.sock.send(rtpPacket, port, address, (error) => {
-                        if (error) {
-                            console.error('[RTP] Error sending packet:', error);
-                        }
-                    });
-                } catch (error) {
-                    if (error && error.code === 'ERR_SOCKET_DGRAM_NOT_RUNNING') {
-                        console.warn('[RTP] Attempted to send through a stopped socket:', error.message || error);
-                    } else {
-                        console.error('[RTP] Unexpected error sending packet:', error);
-                    }
-                }
+                resolve();
             });
         });
     }
 
-    async init(call, uuid) {
-        try {
-            this.port = allocateRtpPort();
-            this.dport = allocateRtpPort();
-        } catch (error) {
-            releaseRtpPort(this.port);
-            this.port = undefined;
-            throw error;
+
+    async sendAcknowledgment({ command, commandTimestamp, status = 'success', message }) {
+        const payload = {
+            type: 'acknowledgment',
+            command,
+            command_timestamp: commandTimestamp ?? Math.floor(Date.now() / 1000),
+            status,
+            timestamp: Math.floor(Date.now() / 1000),
+        };
+
+        if (message !== undefined) {
+            payload.message = message;
         }
-        this.uuid = uuid;
-        this.rtpAdress='127.0.0.1';
-        this.sock.bind(this.dport);
-        this.receiveAudio();
 
-    try {
-      const result = await call.unicast_uuid(uuid, {
-            'local-ip': this.rtpAdress,
-            'local-port': this.port,
-            'remote-ip': this.rtpAdress,
-            'remote-port': this.dport,
-            transport: 'udp',
-          });
-          console.log('Unicast result:', result);
-    } catch (error) {
-          console.error('Unicast error:', error);
+        await this.sendJsonMessage(payload);
     }
 
-//        await setTimeout(3000); // for echo test
-//        this.sendAudio(this.rtpAdress, this.port); // for echo test
-        await this.connectDeepgramWebSocket();
-        this.startAudioStreaming();
+
+    clearOutboundQueue() {
+        const clearedFrames = this.outboundQueue.length;
+        this.outboundQueue = [];
+        this.frameRemainder = Buffer.alloc(0);
+        this.nextFrameBoundaryMs = null;
+        this.isProcessingQueue = false;
+
+        if (clearedFrames > 0) {
+            this.logWithTimestamp(`[Queue] Cleared outbound queue (${clearedFrames} frames removed).`);
+        } else {
+            this.logWithTimestamp('[Queue] Outbound queue already empty.');
+        }
     }
 
-    cleanup() {
+
+    async handleClearCommand(payload) {
+        const receivedAt = Math.floor(Date.now() / 1000);
+        this.clearOutboundQueue();
+
+        try {
+            await this.sendAcknowledgment({
+                command: 'clear',
+                commandTimestamp: payload?.timestamp ?? receivedAt,
+                message: 'custom message',
+            });
+        } catch (error) {
+            this.logWithTimestamp(`[WebSocket] Failed to send clear acknowledgment: ${error.message}`, { level: 'warn' });
+        }
+    }
+
+
+    async handleEndCallCommand(payload) {
+        const receivedAt = Math.floor(Date.now() / 1000);
+        try {
+            await this.sendAcknowledgment({
+                command: 'end_call',
+                commandTimestamp: payload?.timestamp ?? receivedAt,
+            });
+        } catch (error) {
+            this.logWithTimestamp(`[WebSocket] Failed to send end_call acknowledgment: ${error.message}`, { level: 'warn' });
+        }
+
+        await this.finalize({ reason: 'NORMAL_CLEARING', hangupCall: true });
+    }
+
+
+    async sendCallEvent(event, { reason, timestamp } = {}) {
+        const normalizedTimestamp = timestamp ?? Math.floor(Date.now() / 1000);
+        let payloadReason = reason;
+
+        if (event === 'answered') {
+            if (this.hasSentAnsweredEvent) {
+                return;
+            }
+            this.hasSentAnsweredEvent = true;
+        }
+
+        if (event === 'hangup') {
+            if (this.hasSentHangupEvent) {
+                return;
+            }
+            this.hasSentHangupEvent = true;
+            if (!payloadReason) {
+                payloadReason = 'NORMAL_CLEARING';
+            }
+        }
+
+        const payload = {
+            type: 'call_event',
+            event,
+            timestamp: normalizedTimestamp,
+        };
+
+        if (payloadReason) {
+            payload.reason = payloadReason;
+        }
+
+        try {
+            await this.sendJsonMessage(payload);
+        } catch (error) {
+            this.logWithTimestamp(`[WebSocket] Failed to send call event '${event}': ${error.message}`, { level: 'warn' });
+        }
+    }
+
+
+    async notifyAnswered() {
+        await this.sendCallEvent('answered');
+    }
+
+
+    async finalize({ reason = 'NORMAL_CLEARING', hangupCall = false } = {}) {
+        if (this.finalizePromise) {
+            return this.finalizePromise;
+        }
+
+        const execution = (async () => {
+            if (hangupCall && this.call) {
+                try {
+                    await this.call.hangup(reason);
+                } catch (error) {
+                    console.error('[FreeSWITCH] Failed to hang up call:', error);
+                }
+            }
+
+            const hangupReason = reason || 'NORMAL_CLEARING';
+            await this.sendCallEvent('hangup', { reason: hangupReason });
+            this.performCleanup();
+        })();
+
+        this.finalizePromise = execution.finally(() => {
+            this.finalizePromise = null;
+        });
+
+        return this.finalizePromise;
+    }
+
+
+    performCleanup() {
         if (this.bufferForwarder) {
             this.bufferQueue.removeListener('data', this.bufferForwarder);
             this.bufferForwarder = null;
@@ -685,10 +848,86 @@ class Channel {
         this.dport = undefined;
         this.port = undefined;
         this.socketReady = false;
+        this.call = null;
     }
 
 
+    sendAudio(address, port) {
+        this.bufferQueue.on('data', (audioData) => {
+            if (!audioData) {
+                return;
+            }
+
+            const rtpPacket = audioData;
+            setTimeout(1000).then(() => {
+                if (!this.sock || !this.socketReady) {
+                    console.warn('[RTP] Attempted to send a packet on an inactive socket. Packet dropped.');
+                    return;
+                }
+
+                try {
+                    this.sock.send(rtpPacket, port, address, (error) => {
+                        if (error) {
+                            console.error('[RTP] Error sending packet:', error);
+                        }
+                    });
+                } catch (error) {
+                    if (error && error.code === 'ERR_SOCKET_DGRAM_NOT_RUNNING') {
+                        console.warn('[RTP] Attempted to send through a stopped socket:', error.message || error);
+                    } else {
+                        console.error('[RTP] Unexpected error sending packet:', error);
+                    }
+                }
+            });
+        });
+    }
+
+    async init(call, uuid) {
+        try {
+            this.port = allocateRtpPort();
+            this.dport = allocateRtpPort();
+        } catch (error) {
+            releaseRtpPort(this.port);
+            this.port = undefined;
+            throw error;
+        }
+
+        this.uuid = uuid;
+        this.call = call;
+        this.hasSentHangupEvent = false;
+        this.hasSentAnsweredEvent = false;
+        this.rtpAdress = '127.0.0.1';
+        this.sock.bind(this.dport);
+        this.receiveAudio();
+
+        try {
+            const result = await call.unicast_uuid(uuid, {
+                'local-ip': this.rtpAdress,
+                'local-port': this.port,
+                'remote-ip': this.rtpAdress,
+                'remote-port': this.dport,
+                transport: 'udp',
+            });
+            let serializedResult = '';
+            try {
+                serializedResult = JSON.stringify(result);
+            } catch (serializationError) {
+                serializedResult = '[unserializable result]';
+            }
+            this.logWithTimestamp(`[FreeSWITCH] Unicast result: ${serializedResult}`);
+        } catch (error) {
+            console.error('Unicast error:', error);
+        }
+
+        await this.connectDeepgramWebSocket();
+        this.startAudioStreaming();
+    }
+
     ensureRecordingStream() {
+        if (!this.recordingEnabled) {
+            return;
+        }
+
         if (this.recordingStream) {
             return;
         }
@@ -714,6 +953,10 @@ class Channel {
 
 
     recordPayload(buffer) {
+        if (!this.recordingEnabled) {
+            return;
+        }
+
         if (!buffer || buffer.length === 0) {
             return;
         }
@@ -802,7 +1045,10 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
 
     console.log('Call cleanup triggered by', reason, uuid);
     delete channels[uuid];
-    existingChannel.cleanup();
+    existingChannel.finalize({ reason: 'NORMAL_CLEARING' }).catch((error) => {
+      console.error('Failed to finalize channel gracefully:', error);
+      existingChannel.performCleanup();
+    });
     if (existingChannel === fsChannel) {
       fsChannel = null;
       metadata = {};
@@ -882,6 +1128,11 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
 
     try {
       await fsChannel.init(call, uuid);
+      try {
+        await fsChannel.notifyAnswered();
+      } catch (error) {
+        console.error('Failed to notify answered event:', error);
+      }
     } catch (error) {
       console.error('Failed to initialize channel after answer:', error);
       cleanupChannel('channel_init_failed');
