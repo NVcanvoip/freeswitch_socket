@@ -138,7 +138,7 @@ function normalizeChannelState(eventBody) {
     }
 
     const candidates = [
-        eventBody['Channel-State'],
+//        eventBody['Channel-State'],
         eventBody['Channel-Call-State'],
         eventBody['Channel-State-Desc'],
         eventBody['variable_callstate'],
@@ -784,6 +784,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   console.log('Incoming call for UUID', uuid);
   call.noevents();
   call.event_json('CHANNEL_CALLSTATE');
+  call.event_json('CHANNEL_PROGRESS');
   call.event_json('CHANNEL_ANSWER');
   call.event_json('CHANNEL_HANGUP_COMPLETE');
   call.event_json('CHANNEL_DESTROY');
@@ -816,7 +817,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
     console.error('Failed to send ring_ready:', error);
   }
 
-  call.on('CHANNEL_CALLSTATE', async ({ body }) => {
+  call.on('CHANNEL_PROGRESS', async ({ body }) => {
     if (handshakeStarted) {
       return;
     }
@@ -839,6 +840,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
 
     const targetUrl = buildDeepgramWsUrl(baseDeepgramWsUrl, metadata);
 
+    console.error('Generate Target Url:', targetUrl);
     if (!fsChannel) {
       fsChannel = new Channel({ deepgramUrl: targetUrl });
       channels[uuid] = fsChannel;
