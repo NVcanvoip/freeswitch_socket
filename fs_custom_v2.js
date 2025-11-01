@@ -300,7 +300,7 @@ class Channel {
             return;
         }
 
-        this.logWithTimestamp(`[WebSocket] Processing audio payload (${payloadBuffer.length} bytes).`);
+        this.logWithTimestamp(`[WebSocket] Processing audio payload (${payloadBuffer.length} bytes).`, { category: 'rtp' });
         this.recordPayload(payloadBuffer);
         this.enqueueFrames(payloadBuffer);
     }
@@ -324,7 +324,7 @@ class Channel {
             const frame = workingBuffer.subarray(0, FRAME_BYTES);
             workingBuffer = workingBuffer.subarray(FRAME_BYTES);
             this.outboundQueue.push(frame);
-            this.logWithTimestamp(`[Queue] Enqueued frame (${frame.length} bytes). Queue size: ${this.outboundQueue.length}.`);
+            this.logWithTimestamp(`[Queue] Enqueued frame (${frame.length} bytes). Queue size: ${this.outboundQueue.length}.`, { category: 'rtp' });
         }
 
         if (workingBuffer.length > 0) {
@@ -351,7 +351,7 @@ class Channel {
                 }
 
                 const frame = this.outboundQueue.shift();
-                this.logWithTimestamp(`[Queue] Dequeued frame (${frame.length} bytes) for sending. Queue size after dequeue: ${this.outboundQueue.length}.`);
+                this.logWithTimestamp(`[Queue] Dequeued frame (${frame.length} bytes) for sending. Queue size after dequeue: ${this.outboundQueue.length}.`, { category: 'rtp' });
                 try {
                     await this.sendPcmFrame(frame);
                 } catch (error) {
@@ -518,7 +518,7 @@ class Channel {
 
     handleDeepgramMessage(message) {
         const payloadBuffer = Buffer.isBuffer(message) ? message : Buffer.from(message);
-        this.logWithTimestamp(`[WebSocket] Message received (${payloadBuffer.length} bytes).`);
+        this.logWithTimestamp(`[WebSocket] Message received (${payloadBuffer.length} bytes).`, { category: 'rtp' });
         const jsonPayload = this.parseDeepgramJsonPayload(payloadBuffer);
 
         if (jsonPayload) {
