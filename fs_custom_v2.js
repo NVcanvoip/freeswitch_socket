@@ -758,10 +758,25 @@ class Channel {
     async handleTransferCommand(payload) {
         const now = Math.floor(Date.now() / 1000);
         const commandTimestamp = payload?.timestamp ?? now;
+        let serializedPayload = '[unserializable payload]';
+        if (ENABLE_DEBUG_LOGGING) {
+            try {
+                serializedPayload = JSON.stringify(payload);
+            } catch (error) {
+                serializedPayload = `[payload serialization failed: ${error.message}]`;
+            }
+            this.logWithTimestamp(`[Transfer] Received transfer payload: ${serializedPayload}`);
+        }
+
         const destinationRaw = payload?.destination;
         const destination = typeof destinationRaw === 'string' ? destinationRaw.trim() : '';
 
         const acknowledge = async (status, message) => {
+            if (ENABLE_DEBUG_LOGGING) {
+                const normalizedMessage = message ?? 'no message';
+                this.logWithTimestamp(`[Transfer] Sending acknowledgment. Status: ${status}. Message: ${normalizedMessage}`);
+            }
+
             try {
                 await this.sendAcknowledgment({
                     command: 'transfer',
@@ -769,6 +784,10 @@ class Channel {
                     status,
                     message,
                 });
+
+                if (ENABLE_DEBUG_LOGGING) {
+                    this.logWithTimestamp(`[Transfer] Acknowledgment dispatched successfully. Status: ${status}.`);
+                }
             } catch (ackError) {
                 const ackMessage = ackError?.message || String(ackError);
                 this.logWithTimestamp(`[Transfer] Failed to send transfer acknowledgment: ${ackMessage}`, { level: 'warn' });
@@ -776,16 +795,27 @@ class Channel {
         };
 
         if (!destination) {
+            this.logWithTimestamp('[Transfer] Destination missing in payload. Aborting transfer.');
             await acknowledge('error', 'missing destination');
             return;
         }
 
         if (!this.call) {
+            this.logWithTimestamp('[Transfer] Call object unavailable. Cannot execute bridge.');
             await acknowledge('error', 'call not available');
             return;
         }
 
         const metadata = this.getMetadata();
+        if (ENABLE_DEBUG_LOGGING) {
+            let serializedMetadata = '[unserializable metadata]';
+            try {
+                serializedMetadata = JSON.stringify(metadata);
+            } catch (error) {
+                serializedMetadata = `[metadata serialization failed: ${error.message}]`;
+            }
+            this.logWithTimestamp(`[Transfer] Metadata snapshot: ${serializedMetadata}`);
+        }
         const parsePositiveInteger = (value, fallback) => {
             if (value === undefined || value === null) {
                 return fallback;
@@ -830,11 +860,23 @@ class Channel {
             dialStringOptions.push(`ignore_early_media=${ignoreEarlyMedia}`);
         }
 
+        if (ENABLE_DEBUG_LOGGING) {
+            this.logWithTimestamp(`[Transfer] Derived values -> legTimeout: ${legTimeout}, callerId: ${callerId || 'n/a'}, domainName: ${domainName || 'n/a'}, sipFromUri: ${sipFromUri || 'n/a'}, ignoreEarlyMedia: ${ignoreEarlyMedia}, externalGatewayId: ${externalGatewayId}, externalGatewayPrefix: ${externalGatewayPrefix || 'n/a'}`);
+        }
+
         const dialString = `[${dialStringOptions.join(',')}]sofia/gateway/gw${externalGatewayId}/${externalGatewayPrefix}${destination}`;
         this.logWithTimestamp(`[Transfer] Initiating bridge using dial string: ${dialString}`);
 
         try {
+            if (ENABLE_DEBUG_LOGGING) {
+                this.logWithTimestamp('[Transfer] Executing bridge command on call.');
+            }
+
             await this.call.execute('bridge', dialString);
+
+            if (ENABLE_DEBUG_LOGGING) {
+                this.logWithTimestamp('[Transfer] Bridge command execution resolved without throwing.');
+            }
         } catch (error) {
             this.logWithTimestamp(`[Transfer] Failed to execute bridge: ${error.message}`, { level: 'error' });
             await acknowledge('error', error?.message || 'bridge failed');
@@ -842,6 +884,9 @@ class Channel {
         }
 
         await acknowledge('success', 'transfer initiated');
+        if (ENABLE_DEBUG_LOGGING) {
+            this.logWithTimestamp('[Transfer] Transfer command handling completed successfully.');
+        }
     }
 
 
