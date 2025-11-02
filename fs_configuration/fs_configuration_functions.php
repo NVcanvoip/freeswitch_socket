@@ -83,6 +83,21 @@ function serveDynamicContextConfiguration($domain, $request, $domainDetails, $cu
         }break;
         case "VOICE_AI_AGENT":{
             // Route call to AI websocket handler
+
+            $websocketChannelVariables = array();
+            $websocketChannelVariables['ws_transfer_ignore_early_media'] = 'true';
+
+            $call_timeout_default = defined('TIMEOUT_CALL') ? TIMEOUT_CALL : 30;
+            $websocketChannelVariables['ws_transfer_call_timeout'] = $call_timeout_default;
+
+            if(!empty($external_gateway_id)){
+                $websocketChannelVariables['ws_transfer_external_gateway_id'] = $external_gateway_id;
+            }
+
+            if(!empty($external_gateway_prefix)){
+                $websocketChannelVariables['ws_transfer_external_gateway_prefix'] = $external_gateway_prefix;
+            }
+
             serveWebsocketEsl(
                 $domain,
                 $destination_number,
@@ -92,7 +107,8 @@ function serveDynamicContextConfiguration($domain, $request, $domainDetails, $cu
                 $customerID,
                 $detectedDestinationDefinition,
                 $domainID,
-                $mysqli
+                $mysqli,
+                $websocketChannelVariables
             );
 
 
@@ -518,6 +534,9 @@ function serveDynamicDIDConfiguration($domainOriginal, $request, $domainDetails,
     $caller_id_name = $request["Caller-Caller-ID-Name"];
     $caller_id_number = $request["Caller-Caller-ID-Number"];
 
+    $external_gateway_id = $customerDetails["sip_provider"];
+    $external_gateway_prefix = $customerDetails["sip_provider_prefix"];
+
 
     $recordingDestinationDefinition = '2 b s record_session::$${recordings_dir}/' . $destinationDomain . '/'.$channel_uuid.'.wav' ;
     //TODO: test call recording, make sure channel_uuid is really unique and can work here.  Can it create directories???
@@ -549,6 +568,20 @@ function serveDynamicDIDConfiguration($domainOriginal, $request, $domainDetails,
         }break;
         case "VOICE_AI_AGENT":{
             // Route DID call to AI websocket handler
+            $websocketChannelVariables = array();
+            $websocketChannelVariables['ws_transfer_ignore_early_media'] = 'true';
+
+            $call_timeout_default = defined('TIMEOUT_CALL') ? TIMEOUT_CALL : 30;
+            $websocketChannelVariables['ws_transfer_call_timeout'] = $call_timeout_default;
+
+            if(!empty($external_gateway_id)){
+                $websocketChannelVariables['ws_transfer_external_gateway_id'] = $external_gateway_id;
+            }
+
+            if(!empty($external_gateway_prefix)){
+                $websocketChannelVariables['ws_transfer_external_gateway_prefix'] = $external_gateway_prefix;
+            }
+
             serveWebsocketEsl(
                 $domainOriginal,
                 $destination_number,
@@ -558,7 +591,8 @@ function serveDynamicDIDConfiguration($domainOriginal, $request, $domainDetails,
                 $customerID,
                 $detectedDestinationDefinition,
                 $domainID,
-                $mysqli
+                $mysqli,
+                $websocketChannelVariables
             );
 
         }break;
@@ -659,6 +693,20 @@ function serveDynamicDIDtoIVRconfiguration($domainOriginal, $request, $domainDet
         }break;
         case "VOICE_AI_AGENT":{
             // Route IVR transfer to AI websocket handler
+            $websocketChannelVariables = array();
+            $websocketChannelVariables['ws_transfer_ignore_early_media'] = 'true';
+
+            $call_timeout_default = defined('TIMEOUT_CALL') ? TIMEOUT_CALL : 30;
+            $websocketChannelVariables['ws_transfer_call_timeout'] = $call_timeout_default;
+
+            if(!empty($external_gateway_id)){
+                $websocketChannelVariables['ws_transfer_external_gateway_id'] = $external_gateway_id;
+            }
+
+            if(!empty($external_gateway_prefix)){
+                $websocketChannelVariables['ws_transfer_external_gateway_prefix'] = $external_gateway_prefix;
+            }
+
             serveWebsocketEsl(
                 $domainOriginal,
                 $destination_number,
@@ -668,7 +716,8 @@ function serveDynamicDIDtoIVRconfiguration($domainOriginal, $request, $domainDet
                 $customerID,
                 $detectedDestinationDefinition,
                 $domainID,
-                $mysqli
+                $mysqli,
+                $websocketChannelVariables
             );
 
         }break;
@@ -5020,7 +5069,8 @@ function serveWebsocketEsl(
     $customerID = "",
     $destinationDefinition = "",
     $domainID = "",
-    $mysqli = null
+    $mysqli = null,
+    $channelVariableOverrides = array()
 ){
 
     $expression = '^(.*)$';
@@ -5090,6 +5140,18 @@ function serveWebsocketEsl(
                 $moh_file = $moh_file_candidate;
             }
         }
+    }
+
+    if(!is_array($channelVariableOverrides)){
+        $channelVariableOverrides = array();
+    }
+
+    if(!isset($channelVariableOverrides['ws_transfer_call_timeout'])){
+        $channelVariableOverrides['ws_transfer_call_timeout'] = $vm_timeout;
+    }
+
+    if(!isset($channelVariableOverrides['ws_transfer_ignore_early_media'])){
+        $channelVariableOverrides['ws_transfer_ignore_early_media'] = 'true';
     }
 
     $defaultContextConfiguration = new XMLWriter();
@@ -5170,6 +5232,31 @@ function serveWebsocketEsl(
         $defaultContextConfiguration->startElement('action');
         $defaultContextConfiguration->writeAttribute('application', 'set');
         $defaultContextConfiguration->writeAttribute('data', 'webhook_token=' . $webhook_token);
+        $defaultContextConfiguration->endElement(); // action
+    }
+
+    foreach($channelVariableOverrides as $channelVariableName => $channelVariableValue){
+        if($channelVariableName === null){
+            continue;
+        }
+
+        $channelVariableName = trim((string)$channelVariableName);
+        if($channelVariableName === ''){
+            continue;
+        }
+
+        if(is_array($channelVariableValue) || is_object($channelVariableValue)){
+            continue;
+        }
+
+        $channelVariableValueString = trim((string)$channelVariableValue);
+        if(strlen($channelVariableValueString) === 0){
+            continue;
+        }
+
+        $defaultContextConfiguration->startElement('action');
+        $defaultContextConfiguration->writeAttribute('application', 'set');
+        $defaultContextConfiguration->writeAttribute('data', $channelVariableName . '=' . $channelVariableValueString);
         $defaultContextConfiguration->endElement(); // action
     }
 

@@ -119,10 +119,17 @@ function extractCallMetadataFromEvent(eventBody) {
     assignIfPresent('destination', 'Caller-Destination-Number', 'variable_sip_to_user');
     assignIfPresent('customer_id', 'variable_vtpbx_customer_id');
     assignIfPresent('domain_id', 'variable_vtpbx_domain_id');
+    assignIfPresent('domain_name', 'variable_domain_name', 'variable_domain');
     assignIfPresent('direction', 'Call-Direction', 'Caller-Direction', 'variable_direction');
     assignIfPresent('network_addr', 'Caller-Network-Addr', 'variable_sip_network_ip');
+    assignIfPresent('sip_from_uri', 'variable_sip_from_uri', 'variable_sip_from_addr');
     assignIfPresent('webhook_url', 'variable_webhook_url');
     assignIfPresent('webhook_token', 'variable_webhook_token');
+    assignIfPresent('call_timeout', 'variable_call_timeout');
+    assignIfPresent('ws_transfer_call_timeout', 'variable_ws_transfer_call_timeout');
+    assignIfPresent('ws_transfer_external_gateway_id', 'variable_ws_transfer_external_gateway_id');
+    assignIfPresent('ws_transfer_external_gateway_prefix', 'variable_ws_transfer_external_gateway_prefix');
+    assignIfPresent('ws_transfer_ignore_early_media', 'variable_ws_transfer_ignore_early_media');
 
     const eventTimestamp = eventBody['Event-Date-Timestamp'];
     if (eventTimestamp !== undefined && eventTimestamp !== null) {
@@ -189,7 +196,7 @@ function releaseRtpPort(port) {
 
 
 class Channel {
-    constructor({ deepgramUrl } = {}) {
+    constructor({ deepgramUrl, metadata } = {}) {
         this.ssrc = Math.floor(Math.random() * 0xFFFFFFFF);
         this.seqNum = 0;
         this.timestamp = 0;
@@ -198,6 +205,7 @@ class Channel {
         this.bufferQueue = new EventEmitter();
         this.bufferQueue.setMaxListeners(100);
         this.port = undefined;
+        this.metadata = metadata && typeof metadata === 'object' ? { ...metadata } : {};
         this.dport = undefined;
         this.outboundQueue = [];
         this.frameRemainder = Buffer.alloc(0);
@@ -253,6 +261,18 @@ class Channel {
         }
 
         this.call = call;
+    }
+
+    setMetadata(metadata) {
+        if (!metadata || typeof metadata !== 'object') {
+            return;
+        }
+
+        this.metadata = { ...this.metadata, ...metadata };
+    }
+
+    getMetadata() {
+        return { ...this.metadata };
     }
 
 
@@ -539,6 +559,11 @@ class Channel {
                 return;
             }
 
+            if (jsonPayload.type === 'transfer') {
+                this.handleTransferCommand(jsonPayload);
+                return;
+            }
+
             const { response } = jsonPayload;
             if (response && typeof response === 'object') {
                 if (response.type === 'ready_to_greet') {
@@ -730,6 +755,95 @@ class Channel {
         }
     }
 
+    async handleTransferCommand(payload) {
+        const now = Math.floor(Date.now() / 1000);
+        const commandTimestamp = payload?.timestamp ?? now;
+        const destinationRaw = payload?.destination;
+        const destination = typeof destinationRaw === 'string' ? destinationRaw.trim() : '';
+
+        const acknowledge = async (status, message) => {
+            try {
+                await this.sendAcknowledgment({
+                    command: 'transfer',
+                    commandTimestamp,
+                    status,
+                    message,
+                });
+            } catch (ackError) {
+                const ackMessage = ackError?.message || String(ackError);
+                this.logWithTimestamp(`[Transfer] Failed to send transfer acknowledgment: ${ackMessage}`, { level: 'warn' });
+            }
+        };
+
+        if (!destination) {
+            await acknowledge('error', 'missing destination');
+            return;
+        }
+
+        if (!this.call) {
+            await acknowledge('error', 'call not available');
+            return;
+        }
+
+        const metadata = this.getMetadata();
+        const parsePositiveInteger = (value, fallback) => {
+            if (value === undefined || value === null) {
+                return fallback;
+            }
+
+            const numeric = Number.parseInt(String(value), 10);
+            if (Number.isNaN(numeric) || !Number.isFinite(numeric) || numeric <= 0) {
+                return fallback;
+            }
+
+            return numeric;
+        };
+
+        const timeoutCandidate = metadata.ws_transfer_call_timeout ?? metadata.call_timeout;
+        const legTimeout = parsePositiveInteger(timeoutCandidate, 30);
+        const callerId = metadata.caller_id ?? '';
+        const domainName = metadata.domain_name ?? '';
+        let sipFromUri = metadata.sip_from_uri;
+        if (!sipFromUri && callerId && domainName) {
+            sipFromUri = `sip:${callerId}@${domainName}`;
+        }
+
+        const ignoreEarlyMedia = (metadata.ws_transfer_ignore_early_media ?? 'true').toString();
+        const externalGatewayId = metadata.ws_transfer_external_gateway_id ?? '';
+        const externalGatewayPrefix = metadata.ws_transfer_external_gateway_prefix ?? '';
+
+        if (!externalGatewayId) {
+            await acknowledge('error', 'missing external gateway id');
+            return;
+        }
+
+        const dialStringOptions = [`leg_timeout=${legTimeout}`];
+        if (sipFromUri) {
+            dialStringOptions.push(`sip_from_uri=${sipFromUri}`);
+        }
+
+        if (callerId) {
+            dialStringOptions.push(`origination_caller_id_number=${callerId}`);
+        }
+
+        if (ignoreEarlyMedia) {
+            dialStringOptions.push(`ignore_early_media=${ignoreEarlyMedia}`);
+        }
+
+        const dialString = `[${dialStringOptions.join(',')}]sofia/gateway/gw${externalGatewayId}/${externalGatewayPrefix}${destination}`;
+        this.logWithTimestamp(`[Transfer] Initiating bridge using dial string: ${dialString}`);
+
+        try {
+            await this.call.execute('bridge', dialString);
+        } catch (error) {
+            this.logWithTimestamp(`[Transfer] Failed to execute bridge: ${error.message}`, { level: 'error' });
+            await acknowledge('error', error?.message || 'bridge failed');
+            return;
+        }
+
+        await acknowledge('success', 'transfer initiated');
+    }
+
 
     async handleEndCallCommand(payload) {
         const receivedAt = Math.floor(Date.now() / 1000);
@@ -863,6 +977,7 @@ class Channel {
         this.port = undefined;
         this.socketReady = false;
         this.call = null;
+        this.metadata = {};
     }
 
 
@@ -1098,16 +1213,22 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
       metadata.timestamp = Math.floor(Date.now() / 1000);
     }
 
+    if (fsChannel) {
+      fsChannel.setMetadata(metadata);
+    }
+
     const targetUrl = buildDeepgramWsUrl(baseDeepgramWsUrl, metadata);
 
     console.error('Generate Target Url:', targetUrl);
     if (!fsChannel) {
-      fsChannel = new Channel({ deepgramUrl: targetUrl });
+      fsChannel = new Channel({ deepgramUrl: targetUrl, metadata });
       channels[uuid] = fsChannel;
       fsChannel.setCall(call);
+      fsChannel.setMetadata(metadata);
     } else {
       fsChannel.setDeepgramUrl(targetUrl);
       fsChannel.setCall(call);
+      fsChannel.setMetadata(metadata);
     }
 
     try {
@@ -1138,11 +1259,13 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
 
     if (!fsChannel) {
       const targetUrl = buildDeepgramWsUrl(baseDeepgramWsUrl, metadata);
-      fsChannel = new Channel({ deepgramUrl: targetUrl });
+      fsChannel = new Channel({ deepgramUrl: targetUrl, metadata });
       channels[uuid] = fsChannel;
       fsChannel.setCall(call);
+      fsChannel.setMetadata(metadata);
     } else {
       fsChannel.setCall(call);
+      fsChannel.setMetadata(metadata);
     }
 
     try {
