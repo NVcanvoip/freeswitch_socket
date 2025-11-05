@@ -71,8 +71,7 @@ wss.on('connection', (ws, request) => {
 
         endCallTimer = setTimeout(() => {
           const endCallPayload = {
-            type: 'transfer',
-            destination: '18185551234',
+            type: 'end_call',
             reason: 'no_response',
             timestamp: Math.floor(Date.now() / 1000),
           };

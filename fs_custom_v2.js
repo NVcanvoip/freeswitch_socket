@@ -150,11 +150,12 @@ function normalizeChannelState(eventBody) {
 
     const candidates = [
 //        eventBody['Channel-State'],
-        eventBody['Channel-Call-State'],
-        eventBody['Channel-State-Desc'],
-        eventBody['variable_callstate'],
-        eventBody['Callstate'],
+        eventBody['variable_current_application_data'],
+//        eventBody['Channel-State-Desc'],
+//        eventBody['variable_callstate'],
+//        eventBody['Callstate'],
     ];
+
 
     for (const candidate of candidates) {
         if (candidate === undefined || candidate === null) {
@@ -1201,6 +1202,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   console.log('Incoming call for UUID', uuid);
   call.noevents();
   call.event_json('CHANNEL_CALLSTATE');
+  call.event_json('PLAYBACK_START');
   call.event_json('CHANNEL_PROGRESS');
   call.event_json('CHANNEL_ANSWER');
   call.event_json('CHANNEL_HANGUP_COMPLETE');
@@ -1232,12 +1234,12 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
   };
 
   try {
-    call.execute('ring_ready');
+    call.execute('playback', 'tone_stream://%(2000,4000,440,480);loops=-1');
   } catch (error) {
     console.error('Failed to send ring_ready:', error);
   }
 
-  call.on('CHANNEL_PROGRESS', async ({ body }) => {
+  call.on('PLAYBACK_START', async ({ body }) => {
     if (handshakeStarted) {
       return;
     }
@@ -1248,7 +1250,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
     }
 
     const normalizedState = normalizeChannelState(eventBody);
-    if (!normalizedState || !normalizedState.includes('RING')) {
+    if (!normalizedState || !normalizedState.includes('TONE_STREAM')) {
       return;
     }
 
@@ -1281,6 +1283,7 @@ server.on('connection', async (call ,{headers, body, data, uuid}) => {
       if (!answerRequested) {
         answerRequested = true;
         try {
+          await call.api(`uuid_break ${uuid} all`);
           call.execute('answer');
         } catch (error) {
           console.error('Failed to execute answer command:', error);
