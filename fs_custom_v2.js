@@ -916,6 +916,18 @@ class Channel {
         }
 
         await acknowledge('success', 'transfer initiated');
+        const hangupTimestamp = Math.floor(Date.now() / 1000);
+        try {
+            await this.sendJsonMessage({
+                type: 'call_event',
+                event: 'hangup',
+                reason: 'call transfer',
+                timestamp: hangupTimestamp,
+            });
+            this.logWithTimestamp('[Transfer] Successfully sent hangup call_event before closing Deepgram WebSocket.');
+        } catch (error) {
+            this.logWithTimestamp(`[Transfer] Failed to send hangup call_event before closing Deepgram WebSocket: ${error.message}`, { level: 'warn' });
+        }
         this.closeDeepgramWebSocket({ reason: 'transfer initiated' });
         if (ENABLE_DEBUG_LOGGING) {
             this.logWithTimestamp('[Transfer] Deepgram WebSocket session closed after successful transfer.');
