@@ -515,6 +515,30 @@ class Channel {
     }
 
 
+    closeDeepgramWebSocket({ code = 1000, reason } = {}) {
+        if (!this.deepgramWs) {
+            return;
+        }
+
+        const readyState = this.deepgramWs.readyState;
+        if (readyState === WebSocket.CLOSING || readyState === WebSocket.CLOSED) {
+            if (ENABLE_DEBUG_LOGGING) {
+                this.logWithTimestamp('[WebSocket] Deepgram WebSocket already closing or closed.');
+            }
+            return;
+        }
+
+        const closeReason = reason ?? 'normal closure';
+        this.logWithTimestamp(`[WebSocket] Closing Deepgram WebSocket. Reason: ${closeReason}`);
+
+        try {
+            this.deepgramWs.close(code, closeReason);
+        } catch (error) {
+            this.logWithTimestamp(`[WebSocket] Error closing Deepgram WebSocket: ${error.message}`, { level: 'warn' });
+        }
+    }
+
+
     startAudioStreaming() {
         if (this.bufferForwarder) {
             return;
@@ -842,8 +866,9 @@ class Channel {
         const ignoreEarlyMedia = (metadata.ws_transfer_ignore_early_media ?? 'true').toString();
         const externalGatewayId = metadata.ws_transfer_external_gateway_id ?? '';
         const externalGatewayPrefix = metadata.ws_transfer_external_gateway_prefix ?? '';
+        const isFourDigitDestination = /^\d{4}$/.test(destination);
 
-        if (!externalGatewayId) {
+        if (!isFourDigitDestination && !externalGatewayId) {
             await acknowledge('error', 'missing external gateway id');
             return;
         }
@@ -865,7 +890,12 @@ class Channel {
             this.logWithTimestamp(`[Transfer] Derived values -> legTimeout: ${legTimeout}, callerId: ${callerId || 'n/a'}, domainName: ${domainName || 'n/a'}, sipFromUri: ${sipFromUri || 'n/a'}, ignoreEarlyMedia: ${ignoreEarlyMedia}, externalGatewayId: ${externalGatewayId}, externalGatewayPrefix: ${externalGatewayPrefix || 'n/a'}`);
         }
 
-        const dialString = `[${dialStringOptions.join(',')}]sofia/gateway/gw${externalGatewayId}/${externalGatewayPrefix}${destination}`;
+        let dialString;
+        if (isFourDigitDestination) {
+            dialString = `[${dialStringOptions.join(',')}]sofia/external/${destination}@fs_path=sip:54.184.27.79:5060`;
+        } else {
+            dialString = `[${dialStringOptions.join(',')}]sofia/gateway/gw${externalGatewayId}/${externalGatewayPrefix}${destination}`;
+        }
         this.logWithTimestamp(`[Transfer] Initiating bridge using dial string: ${dialString}`);
 
         try {
@@ -885,6 +915,10 @@ class Channel {
         }
 
         await acknowledge('success', 'transfer initiated');
+        this.closeDeepgramWebSocket({ reason: 'transfer initiated' });
+        if (ENABLE_DEBUG_LOGGING) {
+            this.logWithTimestamp('[Transfer] Deepgram WebSocket session closed after successful transfer.');
+        }
         if (ENABLE_DEBUG_LOGGING) {
             this.logWithTimestamp('[Transfer] Transfer command handling completed successfully.');
         }
