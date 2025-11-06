@@ -858,9 +858,10 @@ class Channel {
         const legTimeout = parsePositiveInteger(timeoutCandidate, 30);
         const callerId = metadata.caller_id ?? '';
         const domainName = metadata.domain_name ?? '';
-        let sipFromUri = metadata.sip_from_uri;
-        if (!sipFromUri && callerId && domainName) {
+        let sipFromUri;
+        if (callerId && domainName) {
             sipFromUri = `sip:${callerId}@${domainName}`;
+            this.logWithTimestamp(`[Transfer] Set up sipFromUri = sip:${callerId}@${domainName}`);
         }
 
         const ignoreEarlyMedia = (metadata.ws_transfer_ignore_early_media ?? 'true').toString();
@@ -892,7 +893,7 @@ class Channel {
 
         let dialString;
         if (isFourDigitDestination) {
-            dialString = `[${dialStringOptions.join(',')}]sofia/external/${destination}@fs_path=sip:54.184.27.79:5060`;
+            dialString = `[${dialStringOptions.join(',')}]sofia/external/${destination}@${domainName};fs_path=sip:54.184.27.79:5060`;
         } else {
             dialString = `[${dialStringOptions.join(',')}]sofia/gateway/gw${externalGatewayId}/${externalGatewayPrefix}${destination}`;
         }
