@@ -765,6 +765,31 @@ class Channel {
     }
 
 
+    async waitForOutboundQueueDrain({ context = 'operation', pollIntervalMs = 20, logIntervalMs = 1000 } = {}) {
+        const describeState = () => `size=${this.outboundQueue.length}, processing=${this.isProcessingQueue}`;
+
+        if (this.outboundQueue.length === 0 && !this.isProcessingQueue) {
+            return;
+        }
+
+        const normalizedContext = typeof context === 'string' && context.length > 0 ? context : 'operation';
+        this.logWithTimestamp(`[Queue] Waiting for outbound queue to drain before ${normalizedContext}. Current state: ${describeState()}.`);
+
+        let lastLogAt = Date.now();
+        while (this.outboundQueue.length > 0 || this.isProcessingQueue) {
+            const now = Date.now();
+            if (now - lastLogAt >= logIntervalMs) {
+                this.logWithTimestamp(`[Queue] Still waiting for outbound queue to drain before ${normalizedContext}. Current state: ${describeState()}.`);
+                lastLogAt = now;
+            }
+
+            await setTimeout(pollIntervalMs);
+        }
+
+        this.logWithTimestamp(`[Queue] Outbound queue drained before ${normalizedContext}. Final state: ${describeState()}.`);
+    }
+
+
     async handleClearCommand(payload) {
         const receivedAt = Math.floor(Date.now() / 1000);
         this.clearOutboundQueue();
@@ -796,10 +821,14 @@ class Channel {
         const destinationRaw = payload?.destination;
         const destination = typeof destinationRaw === 'string' ? destinationRaw.trim() : '';
 
-        const acknowledge = async (status, message) => {
+        const acknowledge = async (status, message, { waitForQueueDrain = false } = {}) => {
             if (ENABLE_DEBUG_LOGGING) {
                 const normalizedMessage = message ?? 'no message';
                 this.logWithTimestamp(`[Transfer] Sending acknowledgment. Status: ${status}. Message: ${normalizedMessage}`);
+            }
+
+            if (waitForQueueDrain) {
+                await this.waitForOutboundQueueDrain({ context: `transfer acknowledgment (${status})` });
             }
 
             try {
@@ -891,6 +920,8 @@ class Channel {
             this.logWithTimestamp(`[Transfer] Derived values -> legTimeout: ${legTimeout}, callerId: ${callerId || 'n/a'}, domainName: ${domainName || 'n/a'}, sipFromUri: ${sipFromUri || 'n/a'}, ignoreEarlyMedia: ${ignoreEarlyMedia}, externalGatewayId: ${externalGatewayId}, externalGatewayPrefix: ${externalGatewayPrefix || 'n/a'}`);
         }
 
+        await this.waitForOutboundQueueDrain({ context: 'transfer command execution' });
+
         let dialString;
         if (isFourDigitDestination) {
             dialString = `[${dialStringOptions.join(',')}]sofia/external/${destination}@${domainName};fs_path=sip:54.184.27.79:5060`;
@@ -915,7 +946,7 @@ class Channel {
             return;
         }
 
-        await acknowledge('success', 'transfer initiated');
+        await acknowledge('success', 'transfer initiated', { waitForQueueDrain: true });
         const hangupTimestamp = Math.floor(Date.now() / 1000);
         try {
             await this.sendJsonMessage({
@@ -940,6 +971,7 @@ class Channel {
 
     async handleEndCallCommand(payload) {
         const receivedAt = Math.floor(Date.now() / 1000);
+        await this.waitForOutboundQueueDrain({ context: 'end_call command' });
         try {
             await this.sendAcknowledgment({
                 command: 'end_call',
